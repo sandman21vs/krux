@@ -22,10 +22,9 @@ def nfc_on(m5stickv):
     Settings().hardware.nfc.enabled = False
 
 
-def mock_nfc(mocker, tag=object(), has_record=False, record=ENVELOPE):
+def mock_nfc(mocker, has_record=False, record=ENVELOPE):
     """A stand-in for the NFC facade, with the card stack already exercised"""
     nfc = mocker.MagicMock()
-    nfc.poll.return_value = tag
     nfc.has_record.return_value = has_record
     nfc.read_record.return_value = record
     mocker.patch("krux.nfc.NFC", mocker.MagicMock(return_value=nfc))
@@ -42,36 +41,31 @@ def test_disabled_nfc_never_touches_the_bus(m5stickv, mocker):
     Settings().hardware.nfc.enabled = False
     nfc = mock_nfc(mocker)
 
-    page = NFCTapPage(create_ctx(mocker, []))
-    assert not page.open_reader()
+    assert not NFCTapPage(create_ctx(mocker, [])).open_reader()
     nfc.init.assert_not_called()
 
 
 def test_missing_reader_is_reported(nfc_on, mocker):
     from krux.pages.nfc_ui import NFCTapPage
-    from krux.nfc.errors import NFCNotFound
+    from krux.nfc import NFCNotFound
 
     nfc = mock_nfc(mocker)
     nfc.init.side_effect = NFCNotFound("No reader")
 
-    ctx = create_ctx(mocker, [])
-    page = NFCTapPage(ctx)
+    page = NFCTapPage(create_ctx(mocker, []))
     assert not page.open_reader()
     assert page.nfc is None
 
 
 def test_reader_probe_leaves_nothing_attached(nfc_on, mocker):
     from krux.pages.nfc_ui import NFCTapPage
-    from krux.pages import MENU_CONTINUE
 
     nfc = mock_nfc(mocker)
+    NFCTapPage(create_ctx(mocker, [])).test_reader()
 
-    page = NFCTapPage(create_ctx(mocker, []))
-    assert page.test_reader() == MENU_CONTINUE
     nfc.init.assert_called_once()
     nfc.deinit.assert_called_once()
-    # A probe never energizes the antenna
-    nfc.field.assert_not_called()
+    nfc.field.assert_not_called()  # a probe never energizes the antenna
 
 
 # ---------- Tap page ----------
@@ -80,30 +74,28 @@ def test_reader_probe_leaves_nothing_attached(nfc_on, mocker):
 def test_cancelling_the_tap_page_drops_the_field(nfc_on, mocker):
     from krux.pages.nfc_ui import NFCTapPage
     from krux.input import BUTTON_PAGE
-    from krux.nfc.errors import NFCNotFound
+    from krux.nfc import NFCNotFound
 
     nfc = mock_nfc(mocker)
     nfc.poll.side_effect = NFCNotFound("No card")
 
     page = NFCTapPage(create_ctx(mocker, [BUTTON_PAGE]))
     page.open_reader()
-    assert page.wait_for_tag("Save to NFC") is None
+    assert not page.wait_for_tag("Store on NFC Card")
     nfc.field.assert_any_call(True)
     nfc.field.assert_any_call(False)
 
 
-def test_a_card_that_shows_up_is_handed_over(nfc_on, mocker):
+def test_polling_continues_until_a_card_shows_up(nfc_on, mocker):
     from krux.pages.nfc_ui import NFCTapPage
-    from krux.nfc.errors import NFCNotFound
+    from krux.nfc import NFCNotFound
 
-    tag = object()
-    nfc = mock_nfc(mocker, tag=tag)
-    # Empty field twice, then a card
-    nfc.poll.side_effect = [NFCNotFound("No card"), NFCNotFound("No card"), tag]
+    nfc = mock_nfc(mocker)
+    nfc.poll.side_effect = [NFCNotFound("No card"), NFCNotFound("No card"), None]
 
     page = NFCTapPage(create_ctx(mocker, [None, None]))
     page.open_reader()
-    assert page.wait_for_tag("Save to NFC") is tag
+    assert page.wait_for_tag("Store on NFC Card")
 
 
 # ---------- Store ----------
@@ -113,12 +105,11 @@ def test_store_writes_the_envelope(nfc_on, mocker):
     from krux.pages.nfc_ui import StoreOnNFC
     from krux.input import BUTTON_ENTER
 
-    tag = object()
-    nfc = mock_nfc(mocker, tag=tag)
-
+    nfc = mock_nfc(mocker)
     # One press dismisses the confirmation screen
     StoreOnNFC(create_ctx(mocker, [BUTTON_ENTER])).write(ENVELOPE, "abcd1234")
-    nfc.write_record.assert_called_once_with(tag, ENVELOPE)
+
+    nfc.write_record.assert_called_once_with(ENVELOPE)
     nfc.deinit.assert_called_once()
 
 
@@ -126,13 +117,11 @@ def test_store_asks_before_overwriting(nfc_on, mocker):
     from krux.pages.nfc_ui import StoreOnNFC
     from krux.input import BUTTON_ENTER
 
-    tag = object()
-    nfc = mock_nfc(mocker, tag=tag, has_record=True)
-
+    nfc = mock_nfc(mocker, has_record=True)
     StoreOnNFC(create_ctx(mocker, [BUTTON_ENTER, BUTTON_ENTER])).write(
         ENVELOPE, "abcd1234"
     )
-    nfc.write_record.assert_called_once_with(tag, ENVELOPE)
+    nfc.write_record.assert_called_once_with(ENVELOPE)
 
 
 def test_store_declining_the_overwrite_leaves_the_card_alone(nfc_on, mocker):
@@ -140,19 +129,19 @@ def test_store_declining_the_overwrite_leaves_the_card_alone(nfc_on, mocker):
     from krux.input import BUTTON_PAGE
 
     nfc = mock_nfc(mocker, has_record=True)
-
     # BUTTON_PAGE answers "No" on a minimal display
     StoreOnNFC(create_ctx(mocker, [BUTTON_PAGE])).write(ENVELOPE, "abcd1234")
+
     nfc.write_record.assert_not_called()
     nfc.deinit.assert_called_once()
 
 
 def test_store_reports_a_card_that_cannot_hold_the_backup(nfc_on, mocker):
     from krux.pages.nfc_ui import StoreOnNFC
-    from krux.nfc.errors import InvalidRecordError
+    from krux.nfc import NFCSizeError
 
     nfc = mock_nfc(mocker)
-    nfc.write_record.side_effect = InvalidRecordError("too big")
+    nfc.write_record.side_effect = NFCSizeError("too big")
 
     ctx = create_ctx(mocker, [])
     StoreOnNFC(ctx).write(ENVELOPE, "abcd1234")
@@ -167,22 +156,19 @@ def test_load_returns_the_envelope_and_drops_the_reader(nfc_on, mocker):
     from krux.pages.nfc_ui import LoadFromNFC
 
     nfc = mock_nfc(mocker)
-
-    page = LoadFromNFC(create_ctx(mocker, []))
-    assert page.read() == ENVELOPE
+    assert LoadFromNFC(create_ctx(mocker, [])).read() == ENVELOPE
     # The password prompt only ever runs with the antenna already down
     nfc.deinit.assert_called_once()
 
 
 def test_load_from_a_card_with_no_backup(nfc_on, mocker):
     from krux.pages.nfc_ui import LoadFromNFC
-    from krux.nfc.errors import NoRecordError
+    from krux.nfc import NFCNotFound
 
     nfc = mock_nfc(mocker)
-    nfc.read_record.side_effect = NoRecordError("no record")
+    nfc.read_record.side_effect = NFCNotFound("no record")
 
-    ctx = create_ctx(mocker, [])
-    assert LoadFromNFC(ctx).read() is None
+    assert LoadFromNFC(create_ctx(mocker, [])).read() is None
     nfc.deinit.assert_called_once()
 
 
@@ -193,100 +179,45 @@ def test_load_decrypts_into_words(nfc_on, mocker):
     mocker.patch.object(KEFEnvelope, "parse", return_value=True)
     mocker.patch.object(KEFEnvelope, "unseal_ui", return_value=ENTROPY_12)
 
-    words = LoadEncryptedMnemonic(create_ctx(mocker, [])).load_from_nfc()
-    assert len(words) == 12
+    assert len(LoadEncryptedMnemonic(create_ctx(mocker, [])).load_from_nfc()) == 12
 
 
-def test_load_refuses_a_payload_that_is_not_entropy(nfc_on, mocker):
+@pytest.mark.parametrize(
+    "parse_ok, unseal",
+    [
+        # A card that decrypts to plaintext words - a format Krux never writes
+        # to one, and therefore one no genuine card can present
+        (True, b"abandon abandon abandon"),
+        (True, KeyError("Failed to decrypt")),  # wrong password
+        (False, None),  # not a KEF envelope at all
+    ],
+)
+def test_a_card_that_is_not_a_krux_backup_loads_nothing(
+    nfc_on, mocker, parse_ok, unseal
+):
     from krux.pages.encryption_ui import LoadEncryptedMnemonic, KEFEnvelope
     from krux.pages import MENU_CONTINUE
 
     mock_nfc(mocker)
-    mocker.patch.object(KEFEnvelope, "parse", return_value=True)
-    # A card that decrypts to plaintext words - a format Krux never writes to
-    # one, and therefore one no genuine card can present
-    mocker.patch.object(
-        KEFEnvelope, "unseal_ui", return_value=b"abandon abandon abandon"
-    )
+    mocker.patch.object(KEFEnvelope, "parse", return_value=parse_ok)
+    if isinstance(unseal, Exception):
+        mocker.patch.object(KEFEnvelope, "unseal_ui", side_effect=unseal)
+    else:
+        mocker.patch.object(KEFEnvelope, "unseal_ui", return_value=unseal)
 
     ctx = create_ctx(mocker, [])
     assert LoadEncryptedMnemonic(ctx).load_from_nfc() == MENU_CONTINUE
     ctx.display.flash_text.assert_called_once()
-
-
-def test_load_refuses_data_that_is_not_a_kef_envelope(nfc_on, mocker):
-    from krux.pages.encryption_ui import LoadEncryptedMnemonic, KEFEnvelope
-    from krux.pages import MENU_CONTINUE
-
-    mock_nfc(mocker)
-    mocker.patch.object(KEFEnvelope, "parse", return_value=False)
-
-    ctx = create_ctx(mocker, [])
-    assert LoadEncryptedMnemonic(ctx).load_from_nfc() == MENU_CONTINUE
-    ctx.display.flash_text.assert_called_once()
-
-
-def test_load_reports_a_wrong_password(nfc_on, mocker):
-    from krux.pages.encryption_ui import LoadEncryptedMnemonic, KEFEnvelope
-    from krux.pages import MENU_CONTINUE
-
-    mock_nfc(mocker)
-    mocker.patch.object(KEFEnvelope, "parse", return_value=True)
-    mocker.patch.object(
-        KEFEnvelope, "unseal_ui", side_effect=KeyError("Failed to decrypt")
-    )
-
-    ctx = create_ctx(mocker, [])
-    assert LoadEncryptedMnemonic(ctx).load_from_nfc() == MENU_CONTINUE
-    ctx.display.flash_text.assert_called_once()
-
-
-# ---------- Erase ----------
-
-
-def test_erase_blanks_a_card_that_holds_a_backup(nfc_on, mocker):
-    from krux.pages.nfc_ui import EraseNFCCard
-    from krux.input import BUTTON_ENTER
-
-    tag = object()
-    nfc = mock_nfc(mocker, tag=tag, has_record=True)
-
-    EraseNFCCard(create_ctx(mocker, [BUTTON_ENTER])).erase()
-    nfc.erase.assert_called_once_with(tag)
-
-
-def test_erase_leaves_a_card_without_a_backup_alone(nfc_on, mocker):
-    from krux.pages.nfc_ui import EraseNFCCard
-
-    nfc = mock_nfc(mocker, has_record=False)
-
-    EraseNFCCard(create_ctx(mocker, [])).erase()
-    nfc.erase.assert_not_called()
-
-
-def test_erase_can_be_declined(nfc_on, mocker):
-    from krux.pages.nfc_ui import EraseNFCCard
-    from krux.input import BUTTON_PAGE
-
-    nfc = mock_nfc(mocker, has_record=True)
-
-    EraseNFCCard(create_ctx(mocker, [BUTTON_PAGE])).erase()
-    nfc.erase.assert_not_called()
 
 
 # ---------- Menu gating ----------
 
 
-def _load_menu_labels(mocker):
-    """The labels 'Load Mnemonic' offers, without running its loop"""
-    from krux.pages.login import Login
-    import krux.pages.mnemonic_loader as loader
-
+def _menu_labels(mocker, module, run):
+    """The labels a menu offers, without running its loop"""
     captured = []
 
     class FakeMenu:
-        """Captures the items instead of drawing them"""
-
         back_index = 0
 
         def __init__(self, _ctx, items, **_kwargs):
@@ -295,40 +226,35 @@ def _load_menu_labels(mocker):
         def run_loop(self, *_args, **_kwargs):
             return 0, None
 
-    mocker.patch.object(loader, "Menu", FakeMenu)
-    Login(create_ctx(mocker, [])).load_key()
+    mocker.patch.object(module, "Menu", FakeMenu)
+    run()
     return [item[0] for item in captured]
+
+
+def _load_menu(mocker):
+    from krux.pages.login import Login
+    import krux.pages.mnemonic_loader as loader
+
+    login = Login(create_ctx(mocker, []))
+    return _menu_labels(mocker, loader, login.load_key)
 
 
 def test_load_menu_hides_nfc_while_it_is_off(m5stickv, mocker):
     from krux.krux_settings import Settings
 
     Settings().hardware.nfc.enabled = False
-    labels = _load_menu_labels(mocker)
+    labels = _load_menu(mocker)
     assert "From Storage" in labels
     assert not any("NFC" in label for label in labels)
 
 
 def test_load_menu_offers_nfc_when_it_is_on(nfc_on, mocker):
-    assert "From NFC Card" in _load_menu_labels(mocker)
+    assert "From NFC Card" in _load_menu(mocker)
 
 
 def test_backup_menu_offers_nfc_when_it_is_on(nfc_on, mocker):
     import krux.pages.encryption_ui as encryption_ui
 
-    captured = []
-
-    class FakeMenu:
-        """Captures the items instead of drawing them"""
-
-        def __init__(self, _ctx, items, **_kwargs):
-            captured.extend(items)
-
-        def run_loop(self, *_args, **_kwargs):
-            return 0, None
-
-    mocker.patch.object(encryption_ui, "Menu", FakeMenu)
-    encryption_ui.EncryptMnemonic(create_ctx(mocker, [])).encrypt_menu()
-    labels = [item[0] for item in captured]
-    assert "Store on NFC Card" in labels
+    page = encryption_ui.EncryptMnemonic(create_ctx(mocker, []))
+    labels = _menu_labels(mocker, encryption_ui, page.encrypt_menu)
     assert labels.index("Store on NFC Card") == 2

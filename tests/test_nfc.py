@@ -1,14 +1,18 @@
-# NFC reader, tag layer and record I/O tests
+# NFC reader, tag layer and record tests
 #
 # The reader and one MIFARE Classic 1K are emulated at the I2C level, so the
 # whole stack - register access, ISO14443A framing, sector authentication,
-# linear addressing and the record header - is exercised end to end without
-# hardware.
+# linear addressing and the record header - runs end to end without hardware.
+#
+# The card supplies every byte of a record header, so much of this is about
+# what the parser refuses. Each malformed header is something a hostile or
+# half-written tag can present.
 
 import pytest
 
 UID = b"\xde\xad\xbe\xef"
-SAK_CLASSIC_1K = 0x08
+CAPACITY = 720  # a 1K Classic clamped to one record's worth
+SMALL_TAG = 144  # NTAG213
 
 
 def crc_a(data):
@@ -24,53 +28,39 @@ def crc_a(data):
 class FakeClassic:
     """A MIFARE Classic 1K that answers the frames Krux sends it"""
 
-    def __init__(self, uid=UID, sak=SAK_CLASSIC_1K):
+    def __init__(self, uid=UID, sak=0x08):
         self.uid = uid
         self.sak = sak
         self.blocks = [bytearray(16) for _ in range(64)]
         self.authed = False
         self.write_target = None
-        self.refuse_write = False
-
-    @property
-    def bcc(self):
-        """UID check byte"""
-        return self.uid[0] ^ self.uid[1] ^ self.uid[2] ^ self.uid[3]
 
     def frame(self, data, tx_last_bits):
         """Returns (reply, rx_last_bits), or None for silence"""
+        bcc = self.uid[0] ^ self.uid[1] ^ self.uid[2] ^ self.uid[3]
         if tx_last_bits == 7 and data == b"\x52":  # WUPA
             return b"\x04\x00", 0
-
         if data == b"\x93\x20":  # anticollision
-            return self.uid + bytes([self.bcc]), 0
-
+            return self.uid + bytes([bcc]), 0
         if data[:2] == b"\x93\x70":  # select
             return bytes([self.sak]) + crc_a(bytes([self.sak])), 0
-
         if data[:2] == b"\x50\x00":  # HALT draws no reply
             self.authed = False
             return None
-
         if self.write_target is not None:  # the data half of a write
             block, self.write_target = self.write_target, None
             if len(data) != 18 or crc_a(data[:16]) != data[16:]:
                 return None
             self.blocks[block][:] = data[:16]
             return b"\x0a", 4
-
-        if data[0] == 0x30 and len(data) == 4:  # READ
-            if not self.authed:
-                return None
-            block = data[1]
-            return bytes(self.blocks[block]) + crc_a(bytes(self.blocks[block])), 0
-
-        if data[0] == 0xA0 and len(data) == 4:  # WRITE
-            if not self.authed or self.refuse_write:
-                return None
+        if not self.authed or len(data) != 4:
+            return None
+        if data[0] == 0x30:  # READ
+            block = bytes(self.blocks[data[1]])
+            return block + crc_a(block), 0
+        if data[0] == 0xA0:  # WRITE
             self.write_target = data[1]
             return b"\x0a", 4
-
         return None
 
 
@@ -83,10 +73,8 @@ class FakeI2C:
         self.tag = tag
         self.present = present
         self.tx_last_bits = 0
-        self.commands = []
-        self._pending_reg = None
-        # Force a reply the tag would never send, to exercise the size guards
-        self.forced_level = None
+        self.forced_level = None  # a reply length no real tag would send
+        self._reg = None
 
     def writeto(self, _addr, buf):
         """One byte selects a register to read; more than one writes to it"""
@@ -94,83 +82,64 @@ class FakeI2C:
             raise OSError("nack")
         buf = bytes(buf)
         if len(buf) == 1:
-            self._pending_reg = buf[0]
+            self._reg = buf[0]
             return
-        reg, data = buf[0], buf[1:]
-        if reg == 0x09:  # FIFODataReg does not auto increment
-            self.fifo.extend(data)
+        if buf[0] == 0x09:  # FIFODataReg does not auto increment
+            self.fifo.extend(buf[1:])
             return
-        for byte in data:
-            self._write_reg(reg, byte)
+        for byte in buf[1:]:
+            self._write_reg(buf[0], byte)
 
     def readfrom(self, _addr, length):
         """Reads back whatever register was selected"""
         if not self.present:
             raise OSError("nack")
-        reg = self._pending_reg
-        if reg == 0x09:  # draining the FIFO
-            out = bytes(self.fifo[:length])
-            self.fifo = self.fifo[length:]
+        if self._reg == 0x09:  # draining the FIFO
+            out, self.fifo = bytes(self.fifo[:length]), self.fifo[length:]
             return out
-        if reg == 0x0A:  # FIFOLevelReg
+        if self._reg == 0x0A:  # FIFOLevelReg
             level = len(self.fifo) if self.forced_level is None else self.forced_level
             return bytes([level])
-        return bytes(self.regs[reg : reg + 1]) * length
+        return bytes(self.regs[self._reg : self._reg + 1]) * length
 
     def _write_reg(self, reg, val):
         if reg == 0x01:  # CommandReg
-            self.commands.append(val)
-            self._run_command(val)
-            return
-        if reg == 0x0A and val & 0x80:  # flush FIFO
+            self._run(val)
+        elif reg == 0x0A and val & 0x80:  # flush FIFO
             self.fifo = bytearray()
-            return
-        if reg == 0x04:  # ComIrqReg, writing clears
+        elif reg == 0x04:  # ComIrqReg, writing clears
             self.regs[0x04] = 0
-            return
-        if reg == 0x0D:  # BitFramingReg
-            self.tx_last_bits = val & 0x07
-        self.regs[reg] = val
+        else:
+            if reg == 0x0D:  # BitFramingReg
+                self.tx_last_bits = val & 0x07
+            self.regs[reg] = val
 
-    def _run_command(self, cmd):
-        self.regs[0x01] = cmd
-        if cmd == 0x0F:  # soft reset, comes back idle
-            self.regs[0x01] = 0
-        elif cmd == 0x03:  # CalcCRC
-            result = crc_a(bytes(self.fifo))
-            self.regs[0x22], self.regs[0x21] = result[0], result[1]
-            self.regs[0x05] |= 0x04  # DivIrqReg CRCIRq
+    def _run(self, cmd):
+        self.regs[0x01] = 0 if cmd == 0x0F else cmd  # reset comes back idle
+        if cmd == 0x03:  # CalcCRC
+            self.regs[0x22], self.regs[0x21] = crc_a(bytes(self.fifo))
+            self.regs[0x05] |= 0x04  # CRCIRq
         elif cmd == 0x0C:  # Transceive
             self._transceive()
         elif cmd == 0x0E:  # MFAuthent
             if self.tag is not None:
                 self.tag.authed = True
-            self.regs[0x08] |= 0x08  # Status2Reg Crypto1On
-            self.regs[0x04] = 0x10  # ComIrqReg IdleIRq
+            self.regs[0x08] |= 0x08  # Crypto1On
+            self.regs[0x04] = 0x10  # IdleIRq
 
     def _transceive(self):
-        sent = bytes(self.fifo)
-        self.fifo = bytearray()
+        sent, self.fifo = bytes(self.fifo), bytearray()
         reply = self.tag.frame(sent, self.tx_last_bits) if self.tag else None
         self.regs[0x06] = 0  # ErrorReg
         if reply is None:
             self.regs[0x04] = 0x01  # TimerIRq
             return
-        data, last_bits = reply
-        self.fifo = bytearray(data)
-        self.regs[0x0C] = last_bits & 0x07  # ControlReg
-        self.regs[0x04] = 0x20 | 0x10  # RxIRq | IdleIRq
+        self.fifo = bytearray(reply[0])
+        self.regs[0x0C] = reply[1] & 0x07  # ControlReg
+        self.regs[0x04] = 0x30  # RxIRq | IdleIRq
 
 
-def _reader(i2c):
-    from krux.nfc.pcd import WS1850S
-
-    pcd = WS1850S(i2c)
-    pcd.init()
-    return pcd
-
-
-def _nfc(m5stickv, i2c):
+def make_nfc(i2c, select=True):
     """An NFC facade wired to the fake bus instead of a real one"""
     from krux.nfc import NFC
 
@@ -178,323 +147,336 @@ def _nfc(m5stickv, i2c):
     nfc._open_bus = lambda: i2c
     nfc.init()
     nfc.field(True)
+    if select:
+        nfc.poll()
     return nfc
 
 
-# ---------- Reader bring up ----------
+def good_header(nfc_mod, length=16, capacity=CAPACITY):
+    """A valid header for a test to then corrupt"""
+    return bytearray(nfc_mod.build_header(length, capacity))
 
 
-def test_init_probes_the_bus(m5stickv):
-    pcd = _reader(FakeI2C())
-    assert pcd.ready
-    # Comes up with the antenna dark
-    assert not pcd._read_byte(0x14) & 0x03
+# ---------- Record header ----------
 
 
-def test_missing_reader_is_reported(m5stickv):
-    from krux.nfc.pcd import WS1850S
-    from krux.nfc.errors import NFCNotFound
+def test_round_trip(m5stickv):
+    import krux.nfc as nfc
 
-    with pytest.raises(NFCNotFound):
-        WS1850S(FakeI2C(present=False)).init()
-
-
-def test_reader_that_does_not_echo_is_refused(m5stickv):
-    from krux.nfc.pcd import WS1850S
-    from krux.nfc.errors import NFCNotFound
-
-    class Deaf(FakeI2C):
-        """Answers on the bus but does not behave like a WS1850S"""
-
-        def _write_reg(self, reg, val):
-            if reg == 0x2D:
-                return
-            super()._write_reg(reg, val)
-
-    with pytest.raises(NFCNotFound):
-        WS1850S(Deaf()).init()
+    assert nfc.parse_header(nfc.build_header(16, CAPACITY), CAPACITY) == 16
+    assert (
+        nfc.parse_header(nfc.build_header(nfc.MAX_PAYLOAD, CAPACITY), CAPACITY)
+        == nfc.MAX_PAYLOAD
+    )
 
 
-def test_antenna_toggles_tx_control(m5stickv):
-    pcd = _reader(FakeI2C())
-    pcd.antenna(True)
-    assert pcd._read_byte(0x14) & 0x03 == 0x03
-    pcd.antenna(False)
-    assert not pcd._read_byte(0x14) & 0x03
+def test_header_bytes_are_the_shared_on_card_format(m5stickv):
+    """Locks the exact bytes a Kern reader expects.
+
+    The format is shared with the Kern NFC branch. Without this, a refactor
+    could change what lands on the card and cards would stop crossing between
+    the two firmwares silently - both sides would stay self-consistent.
+    """
+    import krux.nfc as nfc
+
+    assert bytes(nfc.build_header(64, CAPACITY)) == b"KRN1\x01\x00\x00\x40" + bytes(8)
+    assert nfc.parse_header(b"KRN1\x01\x00\x00\x2c" + bytes(8), CAPACITY) == 44
 
 
-def test_deinit_drops_the_field(m5stickv):
+@pytest.mark.parametrize(
+    "header",
+    [
+        bytes(16),  # a blank card
+        b"\xff" * 16,  # an erased card
+        b"KRN2\x01\x00\x00\x10" + bytes(8),  # near miss magic
+        b"KRN1\x00\x00\x00\x10" + bytes(8),  # record type zero
+        b"KRN1\x02\x00\x00\x10" + bytes(8),  # unknown record type
+        b"KRN1\x01\x01\x00\x10" + bytes(8),  # reserved byte 5 set
+        b"KRN1\x01\x00\x00\x10" + b"\x01" + bytes(7),  # reserved byte 8 set
+        b"KRN1\x01\x00\x00\x10" + bytes(7) + b"\x01",  # reserved byte 15 set
+        b"KRN1\x01\x00\x00\x10",  # short header
+        b"",
+    ],
+)
+def test_a_card_that_is_not_ours_is_refused(m5stickv, header):
+    import krux.nfc as nfc
+
+    with pytest.raises(nfc.NFCNotFound):
+        nfc.parse_header(header, CAPACITY)
+
+
+@pytest.mark.parametrize(
+    "length, capacity",
+    [
+        (0, CAPACITY),  # empty payload
+        (0xFFFF, CAPACITY),  # 16 bit maximum
+        (705, CAPACITY),  # one past the ceiling
+        (200, SMALL_TAG),  # under the ceiling, larger than the tag
+        (SMALL_TAG - 16 + 1, SMALL_TAG),  # one past a full tag
+        (16, 8),  # capacity below the header
+        (16, 0),
+    ],
+)
+def test_a_length_the_tag_cannot_back_is_refused(m5stickv, length, capacity):
+    """The declared length is a number a stranger picked"""
+    import krux.nfc as nfc
+
+    header = good_header(nfc)
+    header[6], header[7] = length >> 8, length & 0xFF
+    with pytest.raises(nfc.NFCSizeError):
+        nfc.parse_header(header, capacity)
+    with pytest.raises(nfc.NFCSizeError):
+        nfc.build_header(length, capacity)
+
+
+def test_a_payload_exactly_filling_the_tag_is_accepted(m5stickv):
+    import krux.nfc as nfc
+
+    header = nfc.build_header(SMALL_TAG - nfc.HEADER_LEN, SMALL_TAG)
+    assert nfc.parse_header(header, SMALL_TAG) == SMALL_TAG - nfc.HEADER_LEN
+
+
+# ---------- Reader ----------
+
+
+def test_init_comes_up_with_the_antenna_dark(m5stickv):
+    """Callers energize the field deliberately, inside the tap page"""
+    from krux.nfc import NFC
+
     i2c = FakeI2C()
-    pcd = _reader(i2c)
-    pcd.antenna(True)
-    pcd.deinit()
-    assert not pcd.ready
+    nfc = NFC(scl=1, sda=2)
+    nfc._open_bus = lambda: i2c
+    nfc.init()
+    assert nfc.ready
+    assert not i2c.regs[0x14] & 0x03
+
+    nfc.field(True)
+    assert i2c.regs[0x14] & 0x03 == 0x03
+    nfc.field(False)
     assert not i2c.regs[0x14] & 0x03
 
 
-# ---------- Frame exchange guards ----------
+def test_missing_reader_is_reported(m5stickv):
+    from krux.nfc import NFC, NFCNotFound
+
+    nfc = NFC(scl=1, sda=2)
+    nfc._open_bus = lambda: FakeI2C(present=False)
+    with pytest.raises(NFCNotFound):
+        nfc.init()
+
+
+def test_a_bus_device_that_is_not_a_reader_is_refused(m5stickv):
+    """Answers on the bus, but does not behave like a WS1850S"""
+    from krux.nfc import NFC, NFCNotFound
+
+    class Deaf(FakeI2C):
+        def _write_reg(self, reg, val):
+            if reg != 0x2D:
+                super()._write_reg(reg, val)
+
+    nfc = NFC(scl=1, sda=2)
+    nfc._open_bus = lambda: Deaf()
+    with pytest.raises(NFCNotFound):
+        nfc.init()
+
+
+def test_deinit_drops_the_field_and_the_crypto_session(m5stickv):
+    i2c = FakeI2C(FakeClassic())
+    nfc = make_nfc(i2c)
+    nfc.write_record(bytes(32))  # authenticates a sector
+
+    nfc.deinit()
+    assert not nfc.ready
+    assert not i2c.regs[0x14] & 0x03
+    assert not i2c.regs[0x08] & 0x08
 
 
 def test_silent_tag_times_out(m5stickv):
-    from krux.nfc.errors import NFCTimeout
+    from krux.nfc import NFCError
 
-    pcd = _reader(FakeI2C(FakeClassic()))
-    with pytest.raises(NFCTimeout):
-        pcd.transceive(b"\x99", 0, 4)
+    nfc = make_nfc(FakeI2C(FakeClassic()), select=False)
+    with pytest.raises(NFCError):
+        nfc.transceive(b"\x99", 0, 4)
 
 
 def test_oversized_reply_is_refused_not_truncated(m5stickv):
-    from krux.nfc.errors import NFCSizeError
+    """The classic MFRC522 overflow: the tag chooses the reply length"""
+    from krux.nfc import NFCSizeError, NFCError
 
-    i2c = FakeI2C(FakeClassic())
-    pcd = _reader(i2c)
-    # ATQA is two bytes; ask for a buffer that cannot hold it
+    nfc = make_nfc(FakeI2C(FakeClassic()), select=False)
     with pytest.raises(NFCSizeError):
-        pcd.transceive(b"\x52", 7, 1)
+        nfc.transceive(b"\x52", 7, 1)  # ATQA is two bytes
 
-
-def test_reply_longer_than_the_fifo_is_refused(m5stickv):
-    from krux.nfc.errors import NFCResponseError
-
-    i2c = FakeI2C(FakeClassic())
-    pcd = _reader(i2c)
-    i2c.forced_level = 200
-    with pytest.raises(NFCResponseError):
-        pcd.transceive(b"\x52", 7, 64)
+    nfc.i2c.forced_level = 200
+    with pytest.raises(NFCError):
+        nfc.transceive(b"\x52", 7, 64)
 
 
 def test_frame_longer_than_the_fifo_is_refused(m5stickv):
-    from krux.nfc.errors import NFCSizeError
+    from krux.nfc import NFCSizeError
 
-    pcd = _reader(FakeI2C(FakeClassic()))
+    nfc = make_nfc(FakeI2C(FakeClassic()), select=False)
     with pytest.raises(NFCSizeError):
-        pcd.transceive(b"\x00" * 65, 0, 2)
+        nfc.transceive(b"\x00" * 65, 0, 2)
 
 
 def test_reader_error_bits_fail_the_exchange(m5stickv):
-    from krux.nfc.errors import NFCResponseError
+    """Two cards in the field"""
+    from krux.nfc import NFCError
 
     class Colliding(FakeI2C):
-        """Two cards in the field"""
-
         def _transceive(self):
             super()._transceive()
             self.regs[0x06] = 0x08  # CollErr
 
-    pcd = _reader(Colliding(FakeClassic()))
-    with pytest.raises(NFCResponseError):
-        pcd.transceive(b"\x52", 7, 4)
-
-
-def test_bad_crc_is_caught(m5stickv):
-    from krux.nfc.errors import NFCCRCError
-
-    class Lying(FakeClassic):
-        """Answers a select with a corrupted CRC"""
-
-        def frame(self, data, tx_last_bits):
-            reply = super().frame(data, tx_last_bits)
-            if reply and data[:2] == b"\x93\x70":
-                return bytes([self.sak]) + b"\x00\x00", 0
-            return reply
-
-    pcd = _reader(FakeI2C(Lying()))
-    with pytest.raises(NFCCRCError):
-        pcd.transceive_crc(b"\x93\x70" + UID + bytes([Lying().bcc]), 3)
+    nfc = make_nfc(Colliding(FakeClassic()), select=False)
+    with pytest.raises(NFCError):
+        nfc.transceive(b"\x52", 7, 4)
 
 
 def test_calc_crc_matches_the_reference(m5stickv):
-    pcd = _reader(FakeI2C())
-    assert pcd.calc_crc(b"\x30\x04") == crc_a(b"\x30\x04")
+    nfc = make_nfc(FakeI2C(), select=False)
+    assert nfc.calc_crc(b"\x30\x04") == crc_a(b"\x30\x04")
 
 
 # ---------- Selection ----------
 
 
 def test_select_reads_a_classic(m5stickv):
-    from krux.nfc.picc import PICC, TAG_MIFARE_CLASSIC
+    from krux.nfc import TAG_CLASSIC
 
-    picc = PICC(_reader(FakeI2C(FakeClassic())))
-    tag = picc.select()
-    assert tag.type == TAG_MIFARE_CLASSIC
-    assert tag.uid == UID
-    assert tag.sak == SAK_CLASSIC_1K
-    # 47 data blocks of 16 bytes, clamped to one record's worth
-    assert tag.capacity == 720
+    nfc = make_nfc(FakeI2C(FakeClassic()))
+    kind, uid, capacity = nfc.tag
+    assert (kind, uid, capacity) == (TAG_CLASSIC, UID, CAPACITY)
 
 
-def test_empty_field_reports_no_card(m5stickv):
-    from krux.nfc.picc import PICC
-    from krux.nfc.errors import NFCNotFound
+@pytest.mark.parametrize(
+    "tag",
+    [
+        None,  # an empty field
+        FakeClassic(sak=0x20),  # ISO14443-4, a card Krux cannot address
+    ],
+)
+def test_a_card_krux_cannot_use_reads_as_an_empty_field(m5stickv, tag):
+    from krux.nfc import NFCNotFound
 
-    picc = PICC(_reader(FakeI2C()))
+    nfc = make_nfc(FakeI2C(tag), select=False)
     with pytest.raises(NFCNotFound):
-        picc.select()
-
-
-def test_unsupported_sak_is_refused(m5stickv):
-    from krux.nfc.picc import PICC
-    from krux.nfc.errors import NFCNotFound
-
-    # 0x20 is ISO14443-4, a card Krux does not know how to address
-    picc = PICC(_reader(FakeI2C(FakeClassic(sak=0x20))))
-    with pytest.raises(NFCNotFound):
-        picc.select()
+        nfc.poll()
 
 
 def test_bad_bcc_is_refused(m5stickv):
-    from krux.nfc.picc import PICC
-    from krux.nfc.errors import NFCNotFound
+    """A malformed anticollision reply is not a UID to build on"""
+    from krux.nfc import NFCNotFound
 
     class BadBcc(FakeClassic):
-        """A malformed anticollision reply"""
-
         def frame(self, data, tx_last_bits):
             if data == b"\x93\x20":
                 return self.uid + b"\x00", 0
             return super().frame(data, tx_last_bits)
 
-    picc = PICC(_reader(FakeI2C(BadBcc())))
+    nfc = make_nfc(FakeI2C(BadBcc()), select=False)
     with pytest.raises(NFCNotFound):
-        picc.select()
+        nfc.poll()
+
+
+def test_bad_crc_is_caught(m5stickv):
+    from krux.nfc import NFCNotFound
+
+    class Lying(FakeClassic):
+        def frame(self, data, tx_last_bits):
+            if data[:2] == b"\x93\x70":
+                return bytes([self.sak]) + b"\x00\x00", 0
+            return super().frame(data, tx_last_bits)
+
+    nfc = make_nfc(FakeI2C(Lying()), select=False)
+    with pytest.raises(NFCNotFound):
+        nfc.poll()
 
 
 # ---------- Linear addressing ----------
 
 
 def test_block_mapping_never_touches_block_zero_or_a_trailer(m5stickv):
-    from krux.nfc.picc import PICC, MF_DATA_BLOCKS
+    """A corrupted sector trailer bricks its sector permanently"""
+    from krux.nfc import NFC, MF_DATA_BLOCKS, NFCSizeError
 
-    blocks = [PICC._mf_physical_block(i) for i in range(MF_DATA_BLOCKS)]
+    blocks = [NFC._block(i) for i in range(MF_DATA_BLOCKS)]
     assert 0 not in blocks
     assert not any(block % 4 == 3 for block in blocks)
-    assert blocks == sorted(blocks)
-    assert len(set(blocks)) == MF_DATA_BLOCKS
+    assert blocks == sorted(set(blocks)) and len(blocks) == MF_DATA_BLOCKS
     assert blocks[:4] == [1, 2, 4, 5]
 
-
-def test_block_past_the_last_data_block_is_refused(m5stickv):
-    from krux.nfc.picc import PICC, MF_DATA_BLOCKS
-    from krux.nfc.errors import NFCSizeError
-
     with pytest.raises(NFCSizeError):
-        PICC._mf_physical_block(MF_DATA_BLOCKS)
+        NFC._block(MF_DATA_BLOCKS)
 
 
 def test_read_and_write_span_blocks(m5stickv):
-    from krux.nfc.picc import PICC
-
-    tag_model = FakeClassic()
-    picc = PICC(_reader(FakeI2C(tag_model)))
-    tag = picc.select()
+    nfc = make_nfc(FakeI2C(FakeClassic()))
 
     payload = bytes(range(48))
-    picc.write(tag, 0, payload)
-    assert picc.read(tag, 0, len(payload)) == payload
+    nfc.write(0, payload)
+    assert nfc.read(0, len(payload)) == payload
     # An unaligned read still lands on the right bytes
-    assert picc.read(tag, 5, 20) == payload[5:25]
+    assert nfc.read(5, 20) == payload[5:25]
 
 
-def test_write_outside_the_tag_is_refused(m5stickv):
-    from krux.nfc.picc import PICC
-    from krux.nfc.errors import NFCSizeError
+@pytest.mark.parametrize("offset, size", [(0, CAPACITY + 1), (CAPACITY - 8, 16)])
+def test_a_range_outside_the_tag_is_refused(m5stickv, offset, size):
+    from krux.nfc import NFCSizeError
 
-    picc = PICC(_reader(FakeI2C(FakeClassic())))
-    tag = picc.select()
+    nfc = make_nfc(FakeI2C(FakeClassic()))
     with pytest.raises(NFCSizeError):
-        picc.write(tag, 0, bytes(tag.capacity + 1))
+        nfc.read(offset, size)
     with pytest.raises(NFCSizeError):
-        picc.read(tag, tag.capacity - 8, 16)
+        nfc.write(offset, bytes(size))
 
 
 def test_unaligned_write_is_refused(m5stickv):
-    from krux.nfc.picc import PICC
-    from krux.nfc.errors import NFCSizeError
+    from krux.nfc import NFCSizeError
 
-    picc = PICC(_reader(FakeI2C(FakeClassic())))
-    tag = picc.select()
+    nfc = make_nfc(FakeI2C(FakeClassic()))
     with pytest.raises(NFCSizeError):
-        picc.write(tag, 8, bytes(16))
+        nfc.write(8, bytes(16))
 
 
 # ---------- Records ----------
 
 
 def test_record_round_trip(m5stickv):
-    i2c = FakeI2C(FakeClassic())
-    nfc = _nfc(m5stickv, i2c)
-    tag = nfc.poll()
-
-    assert not nfc.has_record(tag)
+    nfc = make_nfc(FakeI2C(FakeClassic()))
+    assert not nfc.has_record()
 
     envelope = bytes(range(60))
-    nfc.write_record(tag, envelope)
-
-    assert nfc.has_record(tag)
-    assert nfc.read_record(tag) == envelope
-
-
-def test_erase_stops_the_card_presenting_a_record(m5stickv):
-    from krux.nfc.errors import NoRecordError
-
-    nfc = _nfc(m5stickv, FakeI2C(FakeClassic()))
-    tag = nfc.poll()
-
-    nfc.write_record(tag, bytes(32))
-    nfc.erase(tag)
-
-    assert not nfc.has_record(tag)
-    with pytest.raises(NoRecordError):
-        nfc.read_record(tag)
-
-
-def test_payload_over_the_ceiling_is_refused(m5stickv):
-    from krux.nfc.errors import InvalidRecordError
-    from krux.nfc.record import MAX_PAYLOAD
-
-    nfc = _nfc(m5stickv, FakeI2C(FakeClassic()))
-    tag = nfc.poll()
-
-    with pytest.raises(InvalidRecordError):
-        nfc.write_record(tag, bytes(MAX_PAYLOAD + 1))
+    nfc.write_record(envelope)
+    assert nfc.has_record()
+    assert nfc.read_record() == envelope
 
 
 def test_blank_card_reports_no_record(m5stickv):
-    from krux.nfc.errors import NoRecordError
+    from krux.nfc import NFCNotFound
 
-    nfc = _nfc(m5stickv, FakeI2C(FakeClassic()))
-    tag = nfc.poll()
+    nfc = make_nfc(FakeI2C(FakeClassic()))
+    assert not nfc.has_record()
+    with pytest.raises(NFCNotFound):
+        nfc.read_record()
 
-    assert not nfc.has_record(tag)
-    with pytest.raises(NoRecordError):
-        nfc.read_record(tag)
+
+def test_payload_over_the_ceiling_is_refused(m5stickv):
+    from krux.nfc import MAX_PAYLOAD, NFCSizeError
+
+    nfc = make_nfc(FakeI2C(FakeClassic()))
+    with pytest.raises(NFCSizeError):
+        nfc.write_record(bytes(MAX_PAYLOAD + 1))
 
 
 def test_a_card_that_stops_answering_mid_read_fails(m5stickv):
-    from krux.nfc.errors import NFCError
+    from krux.nfc import NFCError
 
-    tag_model = FakeClassic()
-    nfc = _nfc(m5stickv, FakeI2C(tag_model))
-    tag = nfc.poll()
-    nfc.write_record(tag, bytes(range(40)))
+    tag = FakeClassic()
+    nfc = make_nfc(FakeI2C(tag))
+    nfc.write_record(bytes(range(40)))
 
-    tag_model.authed = False
-    tag_model.refuse_write = True
-
-    def silent(data, tx_last_bits):
-        return None
-
-    tag_model.frame = silent
+    tag.frame = lambda data, bits: None
     with pytest.raises(NFCError):
-        nfc.read_record(tag)
-
-
-def test_deinit_releases_the_tag_and_the_field(m5stickv):
-    i2c = FakeI2C(FakeClassic())
-    nfc = _nfc(m5stickv, i2c)
-    nfc.poll()
-
-    nfc.deinit()
-    assert not nfc.is_ready()
-    assert not i2c.regs[0x14] & 0x03
-    assert not i2c.regs[0x08] & 0x08  # crypto1 dropped
+        nfc.read_record()
