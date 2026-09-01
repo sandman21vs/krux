@@ -211,3 +211,29 @@ def test_build_refuses_an_empty_payload(m5stickv):
 
     with pytest.raises(InvalidRecordError):
         record.build_header(0, CAPACITY)
+
+
+# ---------- Interoperability ----------
+
+
+def test_header_bytes_are_the_shared_on_card_format(m5stickv):
+    """Locks the exact bytes a Kern reader expects.
+
+    The format is shared with the Kern NFC branch. If a refactor here changes
+    what lands on the card, cards stop crossing between the two firmwares -
+    silently, because both sides would still be self-consistent.
+    """
+    record = _record(m5stickv)
+
+    header = record.build_header(64, CAPACITY)
+    assert bytes(header) == b"KRN1" + b"\x01\x00\x00\x40" + bytes(8)
+
+
+def test_a_card_written_by_kern_parses(m5stickv):
+    """A header exactly as the Kern branch writes it"""
+    record = _record(m5stickv)
+
+    kern_header = b"KRN1" + b"\x01\x00\x00\x2c" + bytes(8)
+    rec_type, length = record.parse_header(kern_header, CAPACITY)
+    assert rec_type == record.RECORD_KEF
+    assert length == 44
