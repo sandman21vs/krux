@@ -36,7 +36,7 @@ from . import (
 from ..display import BOTTOM_PROMPT_LINE
 from ..qr import FORMAT_UR
 from ..key import Key
-from ..krux_settings import t
+from ..krux_settings import t, Settings
 
 DIGITS_HEX = "0123456789ABCDEF"
 DIGITS_OCT = "01234567"
@@ -51,14 +51,14 @@ class MnemonicLoader(Page):
 
     def load_key(self):
         """Handler for the 'load mnemonic' menu item"""
-        submenu = Menu(
-            self.ctx,
-            [
-                (t("Via Camera"), self.load_key_from_camera),
-                (t("Via Manual Input"), self.load_key_from_manual_input),
-                (t("From Storage"), self.load_mnemonic_from_storage),
-            ],
-        )
+        menu_items = [
+            (t("Via Camera"), self.load_key_from_camera),
+            (t("Via Manual Input"), self.load_key_from_manual_input),
+            (t("From Storage"), self.load_mnemonic_from_storage),
+        ]
+        if Settings().hardware.nfc.enabled:
+            menu_items.append((t("From NFC Card"), self.load_mnemonic_from_nfc))
+        submenu = Menu(self.ctx, menu_items)
         index, status = submenu.run_loop()
         if index == submenu.back_index:
             return MENU_CONTINUE
@@ -108,6 +108,16 @@ class MnemonicLoader(Page):
 
         encrypted_mnemonics = LoadEncryptedMnemonic(self.ctx)
         words = encrypted_mnemonics.load_from_storage()
+        if words == MENU_CONTINUE:
+            return MENU_CONTINUE
+        return self._load_key_from_words(words)
+
+    def load_mnemonic_from_nfc(self):
+        """Handler to 'load mnemonic'>'from NFC card"""
+        from .encryption_ui import LoadEncryptedMnemonic
+
+        encrypted_mnemonics = LoadEncryptedMnemonic(self.ctx)
+        words = encrypted_mnemonics.load_from_nfc()
         if words == MENU_CONTINUE:
             return MENU_CONTINUE
         return self._load_key_from_words(words)
