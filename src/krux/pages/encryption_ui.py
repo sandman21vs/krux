@@ -670,16 +670,13 @@ class EncryptMnemonic(Page):
     def store_mnemonic_on_nfc(self):
         """Save encrypted mnemonic on an NFC card.
 
-        Same envelope that goes to flash and SD, a different medium: the card
-        never sees anything the other two destinations do not.
+        The same envelope that goes to flash and SD, on a different medium.
         """
         from .nfc_ui import StoreOnNFC
 
         encrypted_data, mnemonic_id = self._encrypt_mnemonic_with_label()
-        if encrypted_data is None:
-            return
-
-        StoreOnNFC(self.ctx).write(encrypted_data, mnemonic_id)
+        if encrypted_data is not None:
+            StoreOnNFC(self.ctx).write(encrypted_data, mnemonic_id)
 
     def encrypted_qr_code(self):
         """Exports an encryprted mnemonic QR code"""
@@ -787,7 +784,7 @@ class LoadEncryptedMnemonic(Page):
 
         kef_envelope = KEFEnvelope(self.ctx)
         if not kef_envelope.parse(envelope):
-            self.flash_error(t("Invalid encrypted data"))
+            self.flash_error(t("Failed to decrypt"))
             return MENU_CONTINUE
 
         try:
@@ -798,22 +795,16 @@ class LoadEncryptedMnemonic(Page):
         if entropy is None:
             return MENU_CONTINUE
 
-        # Decrypting does not make these bytes ours. KEF versions with a 16 bit
-        # hidden auth let a wrong password through roughly once in 65536 tries,
-        # and a planted card could have been encrypted with a password its
-        # author chose. So the payload passes one narrow gate: raw entropy only,
-        # 16 or 32 bytes, the single format Krux ever writes to a card. What a
-        # card cannot do is decide whose seed gets used - the fingerprint
-        # confirmation screen still stands between here and a loaded wallet.
+        # Decrypting does not make these bytes ours: KEF versions with a 16 bit
+        # hidden auth let a wrong password through about once in 65536 tries,
+        # and a planted card could carry a password its author chose. So the
+        # payload passes one narrow gate - raw entropy, the only thing Krux ever
+        # writes to a card. Whose seed it is stays the fingerprint screen's
+        # question, exactly as it is for a QR code.
         if len(entropy) not in NFC_ENTROPY_LENGTHS:
             self.flash_error(t("Invalid mnemonic length"))
             return MENU_CONTINUE
-
-        try:
-            return bip39.mnemonic_from_bytes(entropy).split()
-        except Exception:
-            self.flash_error(t("Failed to load"))
-            return MENU_CONTINUE
+        return bip39.mnemonic_from_bytes(entropy).split()
 
     def _remove_encrypted_mnemonic(self, mnemonic_id, sd_card=False):
         """Deletes a mnemonic"""

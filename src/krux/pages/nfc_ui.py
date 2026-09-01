@@ -19,12 +19,12 @@
 # LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 # THE SOFTWARE.
-"""NFC card pages - tap prompt, store, load and erase.
+"""NFC card pages - tap prompt and card I/O.
 
-The RF field is energized in exactly one place, NFCTapPage, and it comes down
-with the page. Outside these pages the reader is inert: the I2C bus is not even
-opened, so a device with NFC switched off never touches the module even with it
-plugged in.
+The RF field is energized in exactly one place, NFCTapPage, and comes down on
+every exit path. Outside these pages the reader is inert: with NFC switched off
+the I2C bus is never opened, so a module left plugged in is untouched rather
+than merely unused.
 
 Only the KEF envelope crosses the antenna. The mnemonic is turned into entropy
 and sealed before the reader is attached, and the reader is detached again
@@ -36,8 +36,7 @@ from ..krux_settings import t, Settings
 from ..themes import theme
 from . import Page, MENU_CONTINUE
 
-# How often the field is asked whether a card showed up. It is also how long a
-# cancel keypress can wait, so it stays short.
+# Also how long a cancel keypress can wait, so it stays short
 POLL_INTERVAL_MS = 200
 
 
@@ -53,66 +52,51 @@ class NFCTapPage(Page):
 
         The menu entries that lead here are already gated on the setting, but
         the check is repeated at the hardware boundary so no future caller can
-        reach the bus around it. A disabled reader is untouched, not merely
-        unused.
+        reach the bus around it.
         """
+        from ..nfc import NFC, NFCError
+
         if not Settings().hardware.nfc.enabled:
-            self.flash_error(t("NFC is disabled"))
+            self.flash_error(t("NFC reader not found"))
             return False
-
-        from ..nfc import NFC
-        from ..nfc.errors import NFCError
-
         nfc = NFC()
         try:
             nfc.init()
         except NFCError:
             self.flash_error(t("NFC reader not found"))
             return False
-
         self.nfc = nfc
         return True
 
     def close_reader(self):
-        """Drops the field and detaches the reader.
-
-        Called on every exit path, so the antenna is never left live behind a
-        page the user has already walked away from.
-        """
+        """Drops the field and detaches the reader"""
         if self.nfc is not None:
             self.nfc.deinit()
             self.nfc = None
 
-    def wait_for_tag(self, title, hint=""):
-        """Energizes the field and polls until a card shows up or the user leaves.
+    def wait_for_tag(self, title):
+        """Energizes the field and polls until a card shows up or the user leaves"""
+        from ..nfc import NFCError
 
-        Returns the selected tag, or None when the user cancelled or the reader
-        stopped answering.
-        """
-        from ..nfc.errors import NFCError
-
-        text = title + "\n\n" + t("Hold a card to the reader")
-        if hint:
-            text += "\n\n" + hint
         self.ctx.display.clear()
-        self.ctx.display.draw_centered_text(text)
-        self.ctx.display.draw_hcentered_text(
-            t("Press any key to cancel"),
-            BOTTOM_PROMPT_LINE,
-            color=theme.highlight_color,
+        self.ctx.display.draw_centered_text(
+            title + "\n\n" + t("Hold a card to the reader")
         )
-
+        self.ctx.display.draw_hcentered_text(
+            t("Press PAGE to cancel."), BOTTOM_PROMPT_LINE, color=theme.highlight_color
+        )
         try:
             self.nfc.field(True)
         except NFCError:
             self.flash_error(t("NFC reader not found"))
-            return None
+            return False
 
         while True:
             try:
-                return self.nfc.poll()
+                self.nfc.poll()
+                return True
             except NFCError:
-                # An empty field, two cards at once, or a family Krux does not
+                # An empty field, two cards at once, and a family Krux does not
                 # accept all look the same from here: keep waiting.
                 pass
             if (
@@ -127,14 +111,12 @@ class NFCTapPage(Page):
             self.nfc.field(False)
         except NFCError:
             pass
-        return None
+        return False
 
     def test_reader(self):
-        """Probes for a reader and reports what it found"""
+        """Probes for a reader and reports what it found, field never coming up"""
         if not self.open_reader():
             return MENU_CONTINUE
-
-        # The probe is a one off, not a session: leave nothing attached.
         self.close_reader()
         self.flash_success(t("Reader detected"))
         return MENU_CONTINUE
@@ -145,34 +127,25 @@ class StoreOnNFC(NFCTapPage):
 
     def write(self, kef_envelope, mnemonic_id):
         """Asks for a card and writes the envelope onto it"""
-        from ..nfc.errors import NFCError, NFCSizeError, InvalidRecordError
+        from ..nfc import NFCError, NFCSizeError
 
         if not self.open_reader():
             return MENU_CONTINUE
-
         try:
-            tag = self.wait_for_tag(t("Save to NFC"), mnemonic_id)
-            if tag is None:
+            if not self.wait_for_tag(t("Store on NFC Card")):
                 return MENU_CONTINUE
-
-            if self.nfc.has_record(tag):
+            if self.nfc.has_record():
                 self.ctx.display.clear()
-                if not self.prompt(
-                    t("This card already holds a backup.") + "\n\n" + t("Overwrite?"),
-                    self.ctx.display.height() // 2,
-                ):
+                if not self.prompt(t("Overwrite?"), self.ctx.display.height() // 2):
                     return MENU_CONTINUE
-
-                # Ask for the card again rather than trusting the tag from the
-                # first poll: the prompt was up in between, and the card only
-                # had to drift a centimetre.
-                tag = self.wait_for_tag(t("Save to NFC"), mnemonic_id)
-                if tag is None:
+                # Ask for the card again rather than trusting the earlier poll:
+                # the prompt was up in between, and the card only had to drift a
+                # centimetre.
+                if not self.wait_for_tag(t("Store on NFC Card")):
                     return MENU_CONTINUE
-
             try:
-                self.nfc.write_record(tag, kef_envelope)
-            except (NFCSizeError, InvalidRecordError):
+                self.nfc.write_record(kef_envelope)
+            except NFCSizeError:
                 self.flash_error(t("Card too small"))
                 return MENU_CONTINUE
             except NFCError:
@@ -194,22 +167,17 @@ class LoadFromNFC(NFCTapPage):
     """Reads a KEF envelope off a card"""
 
     def read(self):
-        """Returns the envelope bytes, or None when nothing was read.
-
-        The reader is detached before returning, so the decryption password is
-        asked for with the antenna already down.
-        """
-        from ..nfc.errors import NFCError
+        """Returns the envelope bytes, or None. Detaches the reader first, so
+        the password is asked for with the antenna already down."""
+        from ..nfc import NFCError
 
         if not self.open_reader():
             return None
-
         try:
-            tag = self.wait_for_tag(t("Load from NFC"))
-            if tag is None:
+            if not self.wait_for_tag(t("From NFC Card")):
                 return None
             try:
-                return self.nfc.read_record(tag)
+                return self.nfc.read_record()
             except NFCError:
                 # A card with no record, an unreadable one, and one whose header
                 # was refused all say the same thing here on purpose.
@@ -217,42 +185,3 @@ class LoadFromNFC(NFCTapPage):
                 return None
         finally:
             self.close_reader()
-
-
-class EraseNFCCard(NFCTapPage):
-    """Blanks the record header so a card stops presenting a backup"""
-
-    def erase(self):
-        """Asks for a card, confirms, and wipes its record header"""
-        from ..nfc.errors import NFCError
-
-        if not self.open_reader():
-            return MENU_CONTINUE
-
-        try:
-            tag = self.wait_for_tag(t("Erase NFC Card"))
-            if tag is None:
-                return MENU_CONTINUE
-
-            if not self.nfc.has_record(tag):
-                self.flash_error(t("No backup on this card"))
-                return MENU_CONTINUE
-
-            self.ctx.display.clear()
-            if not self.prompt(t("Erase this card?"), self.ctx.display.height() // 2):
-                return MENU_CONTINUE
-
-            tag = self.wait_for_tag(t("Erase NFC Card"))
-            if tag is None:
-                return MENU_CONTINUE
-
-            try:
-                self.nfc.erase(tag)
-            except NFCError:
-                self.flash_error(t("Failed to erase card"))
-                return MENU_CONTINUE
-        finally:
-            self.close_reader()
-
-        self.flash_success(t("Card erased"))
-        return MENU_CONTINUE
