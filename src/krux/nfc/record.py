@@ -27,7 +27,7 @@ refused, and nothing is allocated or read until the header passes.
 
 Layout - 16 byte header at linear offset 0, payload immediately after:
 
-    0..3    magic "KRX1"
+    0..3    magic "KRN1"
     4       record type (RECORD_KEF)
     5       reserved, must be zero
     6..7    payload length, big endian
@@ -43,7 +43,13 @@ unchanged.
 from .errors import InvalidRecordError, NoRecordError
 
 HEADER_LEN = 16
-RECORD_MAGIC = b"KRX1"
+
+# The magic tags the record format, not the device that wrote it. It is shared
+# with the Kern NFC branch, which originated this layout, so a card written by
+# either firmware reads on the other: the envelope below is the same KEF, the
+# plaintext inside it is the same raw BIP39 entropy, and the tag is addressed
+# the same way. Changing this constant on one side alone breaks that.
+RECORD_MAGIC = b"KRN1"
 RECORD_KEF = 1
 
 # Largest payload Krux will read off a card, regardless of what the card claims

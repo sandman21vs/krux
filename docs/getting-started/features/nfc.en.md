@@ -108,7 +108,7 @@ with.
 A 16-byte header at linear offset 0, payload immediately after:
 
 ```
-0..3    magic "KRX1"
+0..3    magic "KRN1"
 4       record type (1 = KEF envelope)
 5       reserved, must be zero
 6..7    payload length, big endian
@@ -117,6 +117,28 @@ A 16-byte header at linear offset 0, payload immediately after:
 
 There is no checksum: the KEF envelope is authenticated, so a half-written or
 decaying card fails to decrypt.
+
+### Interoperability with Kern
+
+The magic tags the format, not the device. A card written by Krux reads on the
+[Kern](https://github.com/sandman21vs/Kern) NFC branch and vice versa, because
+every layer that matters is the same on both sides:
+
+| Layer | Shared |
+|-------|--------|
+| Record header | 16 bytes, same magic, same field offsets, same 704-byte ceiling |
+| Tag addressing | block 0 and sector trailers skipped; Ultralight/NTAG from page 4 |
+| Envelope | KEF — `[len_id][id][version][iterations:3 BE][iv][ciphertext][auth]` |
+| KEF versions | 0, 1, 5, 6, 7, 10, 11, 12, 15, 16, 20, 21 |
+| Plaintext | raw BIP39 entropy, 16 or 32 bytes |
+
+The KEF label is carried inside the envelope and used as the PBKDF2 salt, so
+the password prompt behaves identically whichever firmware wrote the card.
+
+`tests/test_nfc_record.py` pins the header bytes with a golden vector. If a
+refactor changes what lands on the card, that test fails rather than letting
+the two firmwares drift apart silently — both would still be self-consistent,
+and only a card handed between devices would reveal the break.
 
 On MIFARE Classic the linear offset skips block 0 and every sector trailer; on
 Ultralight/NTAG it starts at page 4. Nothing above the tag layer knows which
