@@ -48,6 +48,10 @@ OVERRIDE_LABEL = 4
 
 ENCRYPTION_KEY_MAX_LEN = 200
 
+# What an NFC card is allowed to hand back after decryption: BIP39 entropy for
+# 12 or 24 words, the only thing Krux ever writes to one.
+NFC_ENTROPY_LENGTHS = (16, 32)
+
 
 def decrypt_kef(ctx, data):
     """finds kef-envelope and returns data fully decrypted, else ValueError"""
@@ -608,6 +612,10 @@ class EncryptMnemonic(Page):
             ),
             (t("Encrypted QR Code"), self.encrypted_qr_code),
         ]
+        if Settings().hardware.nfc.enabled:
+            encrypt_outputs_menu.insert(
+                2, (t("Store on NFC Card"), self.store_mnemonic_on_nfc)
+            )
         submenu = Menu(self.ctx, encrypt_outputs_menu)
         _, _ = submenu.run_loop()
         return MENU_CONTINUE
@@ -658,6 +666,20 @@ class EncryptMnemonic(Page):
             )
         self.ctx.input.wait_for_button()
         del mnemonic_storage
+
+    def store_mnemonic_on_nfc(self):
+        """Save encrypted mnemonic on an NFC card.
+
+        Same envelope that goes to flash and SD, a different medium: the card
+        never sees anything the other two destinations do not.
+        """
+        from .nfc_ui import StoreOnNFC
+
+        encrypted_data, mnemonic_id = self._encrypt_mnemonic_with_label()
+        if encrypted_data is None:
+            return
+
+        StoreOnNFC(self.ctx).write(encrypted_data, mnemonic_id)
 
     def encrypted_qr_code(self):
         """Exports an encryprted mnemonic QR code"""
@@ -754,6 +776,44 @@ class LoadEncryptedMnemonic(Page):
         KEFEnvelope.note_decrypt_success()
         del mnemonic_storage
         return words
+
+    def load_from_nfc(self):
+        """Reads an encrypted mnemonic off an NFC card"""
+        from .nfc_ui import LoadFromNFC
+
+        envelope = LoadFromNFC(self.ctx).read()
+        if envelope is None:
+            return MENU_CONTINUE
+
+        kef_envelope = KEFEnvelope(self.ctx)
+        if not kef_envelope.parse(envelope):
+            self.flash_error(t("Invalid encrypted data"))
+            return MENU_CONTINUE
+
+        try:
+            entropy = kef_envelope.unseal_ui()
+        except KeyError:
+            self.flash_error(t("Failed to decrypt"))
+            return MENU_CONTINUE
+        if entropy is None:
+            return MENU_CONTINUE
+
+        # Decrypting does not make these bytes ours. KEF versions with a 16 bit
+        # hidden auth let a wrong password through roughly once in 65536 tries,
+        # and a planted card could have been encrypted with a password its
+        # author chose. So the payload passes one narrow gate: raw entropy only,
+        # 16 or 32 bytes, the single format Krux ever writes to a card. What a
+        # card cannot do is decide whose seed gets used - the fingerprint
+        # confirmation screen still stands between here and a loaded wallet.
+        if len(entropy) not in NFC_ENTROPY_LENGTHS:
+            self.flash_error(t("Invalid mnemonic length"))
+            return MENU_CONTINUE
+
+        try:
+            return bip39.mnemonic_from_bytes(entropy).split()
+        except Exception:
+            self.flash_error(t("Failed to load"))
+            return MENU_CONTINUE
 
     def _remove_encrypted_mnemonic(self, mnemonic_id, sd_card=False):
         """Deletes a mnemonic"""

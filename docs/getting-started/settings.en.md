@@ -119,6 +119,22 @@ Here you choose between `thermal/adafruit`, `cnc/file`, `cnc/grbl` or `none` (de
 
 <div style="clear: both"></div>
 
+#### NFC
+
+Enable storing KEF-encrypted seed backups on NFC cards, read and written through
+an external WS1850S module (M5Stack RFID Unit 2).
+
+`Enabled` is off by default, and while it is off the firmware never touches the
+module: the I2C bus is not opened and the antenna is never powered. `SDA Pin` and
+`SCL Pin` say where the reader is wired — they default to the board's TX and RX
+pins, the same two the thermal printer uses, so a printer and a reader cannot
+share them.
+
+See [NFC Card Storage](features/nfc.md) for wiring, supported tags and the
+threat model. It is a proof of concept: do not put real seeds on these cards.
+
+<div style="clear: both"></div>
+
 #### Touchscreen (Maix Amigo, Yahboom, WonderMV, TZT or Embed Fire only)
 <img src="../../img/maixpy_amigo/touchscreen-300.png" align="right" class="amigo">
 

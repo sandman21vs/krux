@@ -8,6 +8,13 @@
 ### Removed Maix Bit Code
 All Maix Bit support has been removed from the source tree, including its firmware build project. Support for the device was discontinued in 25.09.0, which at the time kept the build parameters available; those are now gone too. The OV5642 sensor handling, used only by that device, was removed along with it.
 
+### NFC Card Storage (proof of concept, off by default)
+Store KEF-encrypted seed backups on NFC cards through an external WS1850S module (M5Stack RFID Unit 2) on I2C. The card is a third destination alongside flash and SD: the same envelope, the same password prompt, a different medium. MIFARE Classic 1K/4K and Ultralight/NTAG21x are supported.
+
+Nothing happens until `Settings > Hardware > NFC > Enabled` is switched on; while it is off the I2C bus is never opened and the antenna is never powered. The field comes up only inside the "hold a card to the reader" page and drops when it closes, and only ciphertext ever crosses it. Menu entries appear under `Backup > Encrypted > Store on NFC Card`, `Load Mnemonic > From NFC Card`, `Tools > Erase NFC Card` and `Tools > Device Tests > NFC Reader`. See [NFC Card Storage](https://selfcustody.github.io/krux/getting-started/features/nfc/) for wiring and the threat model.
+
+This is a proof of concept and has had no security review — do not put real seeds on these cards.
+
 ### Stackbit 1248 Vertical Layout
 Added vertical layout option for Stackbit 1248 backup display, allowing users to choose between Standard (horizontal) and Vertical (transposed) grid orientations.
 
