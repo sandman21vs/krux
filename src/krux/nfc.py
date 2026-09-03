@@ -22,8 +22,8 @@
 """NFC card storage - KEF envelopes on ISO14443A tags.
 
 Reader: WS1850S (M5Stack RFID Unit 2) on an I2C bus opened from the pins
-configured under Settings > Hardware > NFC. Tags: MIFARE Classic 1K/4K and
-Ultralight/NTAG21x, presented to callers as one flat byte array.
+configured under Settings > Hardware > NFC. Tags: MIFARE Classic 1K, presented
+to callers as one flat byte array.
 
 A card is input where an attacker picked every byte, and it only has to be held
 near the device. Every layer here refuses anything that is not exactly what
@@ -71,7 +71,6 @@ CMD_SEL_CL2 = 0x95
 CMD_AUTH_KEY_A = 0x60
 CMD_READ = 0x30
 CMD_MF_WRITE = 0xA0
-CMD_UL_WRITE = 0xA2
 
 # Registers (MFRC522 compatible)
 REG_COMMAND = 0x01
@@ -115,29 +114,21 @@ EXCHANGE_TIMEOUT_MS = 60
 CRC_TIMEOUT_MS = 20
 MAX_POLLS = 4000
 
-# SAK values Krux accepts. Anything else reads as an empty field: the point is
-# to talk only to what we know how to talk to.
-SAK_ULTRALIGHT = 0x00
-SAK_CLASSIC = (0x08, 0x18, 0x88)
+# SAK values Krux accepts: MIFARE Classic 1K, the only family that has been
+# through a card. Anything else reads as an empty field - the point is to talk
+# only to what we know how to talk to. 0x88 is the same 1K silicon from a second
+# source, and clone chips are erratic about which of the two they report.
+SAK_CLASSIC = (0x08, 0x88)
 SAK_CASCADE_BIT = 0x04
 CASCADE_TAG = 0x88
 
-TAG_CLASSIC = 1
-TAG_ULTRALIGHT = 2
-
-# MIFARE Classic geometry. 4K tags are addressed as 1K: their upper sectors hold
-# 16 blocks instead of 4, and a seed needs a fraction of the first 16 anyway.
+# MIFARE Classic 1K geometry.
 MF_BLOCK_SIZE = 16
 MF_DATA_BLOCKS = 47  # 64 blocks less block 0 and 16 sector trailers
 MF_DEFAULT_KEY = b"\xff\xff\xff\xff\xff\xff"
 
-# Ultralight / NTAG geometry. A READ answers with four pages.
+# A Classic READ answers with one whole block.
 READ_LEN = 16
-UL_PAGE_SIZE = 4
-UL_DATA_FIRST_PAGE = 4
-UL_CC_PAGE = 3
-UL_MIN_CAPACITY = 48  # plain Ultralight, pages 4..15
-UL_MAX_CAPACITY = 888  # NTAG216 user memory
 
 # Nothing larger than one record is ever addressable, whatever a tag claims.
 MAX_CAPACITY = MAX_PAYLOAD + HEADER_LEN
@@ -450,18 +441,6 @@ class NFC:
             raise NFCError("Bad SAK")
         return reply[:4], sak[0]
 
-    def _ul_capacity(self):
-        """Derives a usable size from the NTAG compatibility container"""
-        pages = self.transceive_crc(bytes([CMD_READ, UL_CC_PAGE]), READ_LEN + CRC_LEN)
-        if len(pages) != READ_LEN:
-            raise NFCError("Bad CC read")
-
-        # pages[2] was written by whoever held the tag last, and `size * 8` is
-        # exactly the kind of number that overflows if believed. Take it only
-        # behind the NFC Forum magic byte, and clamp it at both ends regardless.
-        capacity = pages[2] * 8 if pages[0] == 0xE1 and pages[2] else UL_MIN_CAPACITY
-        return min(max(capacity, UL_MIN_CAPACITY), UL_MAX_CAPACITY)
-
     def poll(self):
         """Wakes, identifies and selects one tag.
 
@@ -495,22 +474,10 @@ class NFC:
         except NFCError as exc:
             raise NFCNotFound("No card") from exc
 
-        if sak in SAK_CLASSIC:
-            self.tag = (
-                TAG_CLASSIC,
-                uid,
-                min(MF_DATA_BLOCKS * MF_BLOCK_SIZE, MAX_CAPACITY),
-            )
-        elif sak == SAK_ULTRALIGHT:
-            try:
-                capacity = self._ul_capacity()
-            except NFCError as exc:
-                self.release()
-                raise NFCNotFound("Unreadable card") from exc
-            self.tag = (TAG_ULTRALIGHT, uid, min(capacity, MAX_CAPACITY))
-        else:
+        if sak not in SAK_CLASSIC:
             self.release()
             raise NFCNotFound("Unsupported card")
+        self.tag = (uid, min(MF_DATA_BLOCKS * MF_BLOCK_SIZE, MAX_CAPACITY))
         return self.tag
 
     def release(self):
@@ -607,14 +574,14 @@ class NFC:
         """Refuses a range that falls outside the selected tag"""
         if self.tag is None:
             raise NFCError("No tag selected")
-        capacity = self.tag[2]
+        capacity = self.tag[1]
         if not length or offset > capacity or length > capacity - offset:
             raise NFCSizeError("Range outside tag")
 
     def read(self, offset, length):
         """Reads bytes at a linear offset, spanning blocks and pages as needed"""
         self._check_range(offset, length)
-        kind, uid, _ = self.tag
+        uid, _ = self.tag
 
         out = bytearray()
         while len(out) < length:
@@ -623,11 +590,8 @@ class NFC:
             skip = pos - aligned
             take = min(READ_LEN - skip, length - len(out))
 
-            if kind == TAG_CLASSIC:
-                block = self._block(aligned // MF_BLOCK_SIZE)
-                self._authenticate(uid, block)
-            else:
-                block = UL_DATA_FIRST_PAGE + aligned // UL_PAGE_SIZE
+            block = self._block(aligned // MF_BLOCK_SIZE)
+            self._authenticate(uid, block)
 
             # The block arrives with its CRC_A attached; the buffer has to hold
             # both or the reply reads as oversized.
@@ -640,28 +604,23 @@ class NFC:
     def write(self, offset, data):
         """Writes data at a block aligned linear offset, zero padding the tail"""
         self._check_range(offset, len(data))
-        kind, uid, _ = self.tag
-        unit = MF_BLOCK_SIZE if kind == TAG_CLASSIC else UL_PAGE_SIZE
-        if offset % unit:
+        uid, _ = self.tag
+        if offset % MF_BLOCK_SIZE:
             raise NFCSizeError("Unaligned write")
 
         done = 0
         while done < len(data):
-            # Pad the tail so a short final block still writes a full unit; the
+            # Pad the tail so a short final block still writes a full block; the
             # record header carries the real length.
-            chunk = bytearray(unit)
-            chunk[0 : min(unit, len(data) - done)] = data[done : done + unit]
+            chunk = bytearray(MF_BLOCK_SIZE)
+            take = min(MF_BLOCK_SIZE, len(data) - done)
+            chunk[0:take] = data[done : done + take]
 
-            pos = offset + done
-            if kind == TAG_CLASSIC:
-                block = self._block(pos // MF_BLOCK_SIZE)
-                self._authenticate(uid, block)
-                self._ack(bytes([CMD_MF_WRITE, block]))
-                self._ack(chunk)
-            else:
-                page = UL_DATA_FIRST_PAGE + pos // UL_PAGE_SIZE
-                self._ack(bytes([CMD_UL_WRITE, page]) + chunk)
-            done += unit
+            block = self._block((offset + done) // MF_BLOCK_SIZE)
+            self._authenticate(uid, block)
+            self._ack(bytes([CMD_MF_WRITE, block]))
+            self._ack(chunk)
+            done += MF_BLOCK_SIZE
 
     # ---------- Records ----------
 
@@ -672,14 +631,14 @@ class NFC:
         overwriting without a card fault looking like a refusal.
         """
         try:
-            parse_header(self.read(0, HEADER_LEN), self.tag[2])
+            parse_header(self.read(0, HEADER_LEN), self.tag[1])
             return True
         except NFCError:
             return False
 
     def read_record(self):
         """Reads the record off the selected tag, validating it throughout"""
-        length = parse_header(self.read(0, HEADER_LEN), self.tag[2])
+        length = parse_header(self.read(0, HEADER_LEN), self.tag[1])
         # length is already bounded by the ceiling and by this tag's capacity
         return self.read(HEADER_LEN, length)
 
@@ -690,5 +649,5 @@ class NFC:
         block aligned from offset zero and never touches a block it does not
         fully own.
         """
-        header = build_header(len(data), self.tag[2])
+        header = build_header(len(data), self.tag[1])
         self.write(0, bytes(header) + bytes(data))

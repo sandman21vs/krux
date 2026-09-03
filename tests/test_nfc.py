@@ -12,7 +12,7 @@ import pytest
 
 UID = b"\xde\xad\xbe\xef"
 CAPACITY = 720  # a 1K Classic clamped to one record's worth
-SMALL_TAG = 144  # NTAG213
+SMALL_TAG = 144  # a capacity smaller than a record, to exercise the bounds
 
 
 def crc_a(data):
@@ -343,11 +343,8 @@ def test_calc_crc_matches_the_reference(m5stickv):
 
 
 def test_select_reads_a_classic(m5stickv):
-    from krux.nfc import TAG_CLASSIC
-
     nfc = make_nfc(FakeI2C(FakeClassic()))
-    kind, uid, capacity = nfc.tag
-    assert (kind, uid, capacity) == (TAG_CLASSIC, UID, CAPACITY)
+    assert nfc.tag == (UID, CAPACITY)
 
 
 @pytest.mark.parametrize(
@@ -355,6 +352,8 @@ def test_select_reads_a_classic(m5stickv):
     [
         None,  # an empty field
         FakeClassic(sak=0x20),  # ISO14443-4, a card Krux cannot address
+        FakeClassic(sak=0x18),  # Classic 4K, a family Krux is not tested against
+        FakeClassic(sak=0x00),  # Ultralight / NTAG, no longer supported
     ],
 )
 def test_a_card_krux_cannot_use_reads_as_an_empty_field(m5stickv, tag):
