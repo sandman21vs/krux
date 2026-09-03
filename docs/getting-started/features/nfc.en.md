@@ -51,8 +51,6 @@ bus and detaches again without energizing the antenna.
 | Family | SAK | Usable bytes |
 |--------|-----|--------------|
 | MIFARE Classic 1K | `0x08`, `0x88` | 752, capped at 720 |
-| MIFARE Classic 4K | `0x18` | as 1K; upper sectors are not used |
-| Ultralight / NTAG21x | `0x00` | 48–888, capped at 720 |
 
 A KEF-wrapped 24-word seed is under 100 bytes, so every supported tag has room
 to spare. Any other SAK reads as an empty field.
@@ -78,9 +76,10 @@ stay self-consistent and only a card handed between devices would show it.
 Every byte comes from whoever handed the user the card, so parsing is an
 allowlist and nothing is allocated before the header passes. The reader refuses
 a reply that does not fit rather than truncating it (the classic MFRC522
-overflow); selection allowlists SAK, checks BCC and clamps the attacker-written
-NTAG capacity byte; writes to block 0 and sector trailers are refused, because a
-corrupted trailer bricks its sector permanently. After decryption the payload
+overflow); selection allowlists SAK and checks BCC, and capacity comes from that
+allowlist rather than from anything the card claims; writes to block 0 and
+sector trailers are refused, because a corrupted trailer bricks its sector
+permanently. After decryption the payload
 passes one narrow gate: raw BIP39 entropy, 16 or 32 bytes.
 
 **What this does not protect against:** a planted card the user accepts, with a
