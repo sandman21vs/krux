@@ -7,6 +7,7 @@
 
 import pytest
 from . import create_ctx
+from .home_pages.test_home import tdata
 
 ENVELOPE = b"KEF-ENVELOPE-BYTES"
 ENTROPY_12 = bytes(range(16))
@@ -572,3 +573,80 @@ def test_datum_input_menu_offers_the_card_only_when_on(nfc_on, mocker):
         mocker, datum_tool, lambda: datum_tool.DatumToolMenu(create_ctx(mocker, []))
     )
     assert "From NFC Card" in labels
+
+
+# ---------- Extended public key ----------
+
+
+def test_storing_an_xpub_on_a_card_end_to_end(nfc_on, mocker, tdata):
+    """Through the real menus, so the entry is where a user would find it"""
+    from krux.pages.home_pages.pub_key_view import PubkeyView
+    from krux.wallet import Wallet
+    from krux.input import BUTTON_ENTER, BUTTON_PAGE, BUTTON_PAGE_PREV
+    from krux.nfc import RECORD_XPUB
+
+    nfc = mock_nfc(mocker)
+    wallet = Wallet(tdata.SINGLESIG_12_WORD_KEY)
+
+    btn_seq = [
+        BUTTON_ENTER,  # XPUB - Text
+        BUTTON_PAGE,  # Save to SD card -> Store on NFC Card
+        BUTTON_ENTER,  # Store on NFC Card
+        BUTTON_PAGE,  # -> Back
+        BUTTON_ENTER,  # Back to the version menu
+        BUTTON_PAGE_PREV,  # -> Back
+        BUTTON_ENTER,  # leave
+    ]
+    ctx = create_ctx(mocker, btn_seq, wallet)
+    PubkeyView(ctx).public_key()
+
+    payload, record_type = nfc.write_record.call_args[0]
+    assert record_type == RECORD_XPUB
+    # The same bytes the .pub file and the QR code from this page carry
+    assert payload == wallet.key.key_expression(None).encode()
+    nfc.deinit.assert_called_once()
+
+
+def test_the_xpub_card_entry_is_absent_while_nfc_is_off(m5stickv, mocker, tdata):
+    from krux.pages.home_pages.pub_key_view import PubkeyView
+    from krux.wallet import Wallet
+    from krux.input import BUTTON_ENTER, BUTTON_PAGE, BUTTON_PAGE_PREV
+    from krux.krux_settings import Settings
+
+    Settings().hardware.nfc.enabled = False
+    nfc = mock_nfc(mocker)
+
+    btn_seq = [
+        BUTTON_ENTER,  # XPUB - Text
+        BUTTON_PAGE,  # Save to SD card -> Back (no NFC entry in between)
+        BUTTON_ENTER,  # Back to the version menu
+        BUTTON_PAGE_PREV,  # -> Back
+        BUTTON_ENTER,  # leave
+    ]
+    ctx = create_ctx(mocker, btn_seq, Wallet(tdata.SINGLESIG_12_WORD_KEY))
+    PubkeyView(ctx).public_key()
+
+    nfc.init.assert_not_called()
+    assert ctx.input.wait_for_button.call_count == len(btn_seq)
+
+
+def test_an_xpub_card_is_not_a_wallet(nfc_on, mocker, tdata):
+    """A key expression is not a descriptor - parse_wallet refuses it - so the
+    type keeps an xpub card out of the wallet loader rather than letting it
+    fail deeper in."""
+    from krux.wallet import parse_wallet, Wallet
+    from krux.nfc import (
+        RECORD_XPUB,
+        RECORD_DESCRIPTOR,
+        NFCNotFound,
+        build_header,
+        parse_header,
+    )
+
+    expression = Wallet(tdata.SINGLESIG_12_WORD_KEY).key.key_expression(None)
+    with pytest.raises(ValueError):
+        parse_wallet(expression)
+
+    header = build_header(44, 720, RECORD_XPUB)
+    with pytest.raises(NFCNotFound):
+        parse_header(header, 720, RECORD_DESCRIPTOR)

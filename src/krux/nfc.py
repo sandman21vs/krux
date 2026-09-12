@@ -37,7 +37,7 @@ Krux writes.
 Record layout - 16 byte header at linear offset 0, payload right after:
 
     0..3    magic "KRN1"
-    4       record type (RECORD_KEF, RECORD_DESCRIPTOR, RECORD_DATUM)
+    4       record type (RECORD_KEF, RECORD_DESCRIPTOR, RECORD_DATUM, RECORD_XPUB)
     5       reserved, must be zero
     6..7    payload length, big endian
     8..15   reserved, must be zero
@@ -73,7 +73,8 @@ RECORD_MAGIC = b"KRN1"
 RECORD_KEF = 1
 RECORD_DESCRIPTOR = 2
 RECORD_DATUM = 3
-KNOWN_RECORD_TYPES = (RECORD_KEF, RECORD_DESCRIPTOR, RECORD_DATUM)
+RECORD_XPUB = 4
+KNOWN_RECORD_TYPES = (RECORD_KEF, RECORD_DESCRIPTOR, RECORD_DATUM, RECORD_XPUB)
 
 # Largest payload Krux will read off a card, whatever the card claims to hold.
 # A KEF-wrapped 24 word seed is under 100 bytes; the ceiling stops a hostile tag

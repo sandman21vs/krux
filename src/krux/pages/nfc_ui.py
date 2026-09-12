@@ -172,6 +172,20 @@ class StoreOnNFC(NFCTapPage):
             self.ctx.input.wait_for_button()
         return MENU_CONTINUE
 
+    def write_xpub(self, xpub):
+        """Stores an extended public key.
+
+        Plaintext, as the .pub file and the QR code from the same page already
+        are, and with no checksum requirement: nothing consumes an xpub card
+        automatically. A descriptor card is read straight into a wallet, so a
+        flipped bit there has to be caught; an xpub card is read by a person.
+        """
+        from ..nfc import RECORD_XPUB
+
+        if self._write(xpub, RECORD_XPUB, t("Failed to store public key")):
+            self.flash_success(t("Public key stored on card"))
+        return MENU_CONTINUE
+
     def write_datum(self, payload):
         """Stores whatever the datum tool is holding.
 

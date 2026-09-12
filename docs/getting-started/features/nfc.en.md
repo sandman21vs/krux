@@ -53,6 +53,7 @@ bus and detaches again without energizing the antenna.
 | Encrypted mnemonic | Backup → Encrypted → Store on NFC Card | Load Mnemonic → From NFC Card |
 | Wallet output descriptor | Wallet Descriptor → Plaintext or Encrypted | Wallet Descriptor → Load from NFC card |
 | Datum | Tools → Datum Tool → Store on NFC Card | Tools → Datum Tool → From NFC Card |
+| Extended public key | Extended Public Key → *version* → Text → Store on NFC Card | Tools → Datum Tool |
 
 Each record carries a type byte, and a reader asks for the type it can parse, so
 a descriptor card offered to the mnemonic loader — or a seed card offered to the
@@ -63,6 +64,15 @@ A descriptor record holds either a sealed envelope or a bare descriptor, exactly
 as a `.txt` on an SD card may; Krux tells them apart on read. **A mnemonic
 record is always sealed.** The mnemonic loader accepts nothing else, and no part
 of Krux writes a seed to a card in the clear.
+
+An extended public key card carries the same key expression the `.pub` file and
+the QR code from that page carry, and carries it in the clear as they do. It
+needs no checksum because nothing consumes it automatically — a descriptor card
+is read straight into a wallet, so a flipped bit there has to be caught, while
+an xpub card is read by a person. It is also not a descriptor: `parse_wallet`
+refuses a bare key expression, so the separate type keeps it out of the wallet
+loader rather than letting it fail deeper in. The privacy cost is the usual one
+— an xpub is the account's whole history to anyone who waves a reader past it.
 
 The [Datum Tool](../usage/tools.md) is the exception to the type discipline on
 the read side: it opens any record Krux knows how to write, as the bytes it is,
