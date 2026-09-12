@@ -7,9 +7,10 @@
     cloning resistance, and the physical threat model of a backup that answers
     any reader that comes near it. None of that is settled here.
 
-Keeps [KEF-encrypted](encryption/encryption.md) seed backups on NFC cards, read
-and written through an external reader module. The card is a third destination
-alongside flash and SD: same envelope, same password prompt, different medium.
+Keeps [KEF-encrypted](encryption/encryption.md) seed backups and wallet output
+descriptors on NFC cards, read and written through an external reader module.
+The card is a third destination alongside flash and SD: same envelope, same
+password prompt, different medium.
 
 Two readers are supported, chosen under **Settings → Hardware → NFC → Reader**:
 a **WS1850S** on I2C and a **PN5180** on SPI. Which chip is in use is decided in
@@ -28,9 +29,9 @@ small as it can be made:
 - The reader is attached to its bus lazily, in that same page. With the toggle
   off the bus is never opened, so a module left plugged in is untouched rather
   than merely unused.
-- Only the KEF envelope crosses the antenna. The mnemonic is turned into BIP39
-  entropy and sealed before the reader is attached, and the reader is detached
-  again before the decryption password is asked for.
+- Only the KEF envelope crosses the antenna. The payload is sealed before the
+  reader is attached, and the reader is detached again before the decryption
+  password is asked for.
 - The module is external. Unplugged, the feature reports "NFC reader not found".
 
 ## Wiring
@@ -71,6 +72,36 @@ reader and that is expected.
 Check the wiring with **Tools → Device Tests → NFC Reader**, which probes the
 bus and detaches again without energizing the antenna.
 
+## What a card can hold
+
+| Record | Written from | Read from |
+|--------|--------------|-----------|
+| Encrypted mnemonic | Backup → Encrypted → Store on NFC Card | Load Mnemonic → From NFC Card |
+| Wallet output descriptor | Wallet Descriptor → Encrypted | Wallet Descriptor → Load from NFC card |
+
+Each record carries a type byte, and a reader asks for the type it can parse, so
+a descriptor card offered to the mnemonic loader — or a seed card offered to the
+wallet — reads as an empty card. Overwriting still warns for either, because the
+question "is something already here" is asked without a type.
+
+### Why descriptors are encrypted only
+
+The plaintext/encrypted choice the descriptor export offers for QR codes and SD
+files does not extend to cards. Three reasons, in order of weight:
+
+- **No integrity check.** The on-card format carries no checksum on purpose: the
+  KEF envelope authenticates itself, so a half-written or decaying card fails to
+  decrypt instead of returning damaged bytes. A descriptor string has no
+  checksum of its own to fall back on — Krux writes the descriptor as embit
+  serializes it, without the BIP-380 trailer — so a plaintext record on a
+  block-addressed, zero-padded medium would have nothing checking it at all.
+- **Size.** Sealing deflates before it encrypts. A 2-of-3 is about 450 bytes
+  plaintext and a taproot miniscript can pass 880, against a payload ceiling of
+  704; compressed they are roughly 345 and 470. Encrypted descriptors fit where
+  plaintext ones would not.
+- **Privacy.** A descriptor holds every xpub in the wallet, which is its whole
+  history. Plaintext means any reader brought near the card gets it.
+
 ## Supported tags
 
 | Family | SAK | Usable bytes |
@@ -104,8 +135,15 @@ a reply that does not fit rather than truncating it (the classic MFRC522
 overflow); selection allowlists SAK and checks BCC, and capacity comes from that
 allowlist rather than from anything the card claims; writes to block 0 and
 sector trailers are refused, because a corrupted trailer bricks its sector
-permanently. After decryption the payload
-passes one narrow gate: raw BIP39 entropy, 16 or 32 bytes.
+permanently.
+
+Decryption is not acceptance. A KEF version with a 16-bit hidden auth lets a
+wrong password through about once in 65536 tries, and a planted card can carry
+a password its author chose, so what comes out still has to get past a gate —
+and it is the same gate the same data faces arriving by QR code or SD card. For
+a mnemonic that is raw BIP39 entropy, 16 or 32 bytes. For a descriptor it is the
+descriptor parser, which also decides whether the loaded key is a cosigner. NFC
+adds a medium, never a parser and never a shortcut past one.
 
 **What this does not protect against:** a planted card the user accepts, with a
 password they get right, loads the attacker's seed. That is the same exposure as

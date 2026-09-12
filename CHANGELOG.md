@@ -13,6 +13,8 @@ Store KEF-encrypted seed backups on NFC cards through an external reader. The ca
 
 Nothing happens until `Settings > Hardware > NFC > Enabled` is switched on; while it is off the bus is never opened and the antenna is never powered. The field comes up only inside the "hold a card to the reader" page and drops when it closes, and only ciphertext ever crosses it. Menu entries appear under `Backup > Encrypted > Store on NFC Card`, `Load Mnemonic > From NFC Card` and `Tools > Device Tests > NFC Reader`. See [NFC Card Storage](https://selfcustody.github.io/krux/getting-started/features/nfc/) for wiring and the threat model.
 
+Wallet output descriptors can go on a card too, from `Wallet > Wallet Descriptor > Encrypted` and back through `Load from NFC card`. Encrypted only: a descriptor string carries no checksum of its own, and the on-card format carries none either because the KEF envelope authenticates itself — so a plaintext record would reach a padded, block-addressed medium with nothing checking it. Sealing also deflates, which is what makes a large miniscript descriptor fit, and it keeps every xpub in the wallet from answering whoever waves a reader past it. Each record declares its type, so a descriptor card and a seed card refuse each other's loaders.
+
 This is a proof of concept and has had no security review — do not put real seeds on these cards.
 
 ### Stackbit 1248 Vertical Layout
