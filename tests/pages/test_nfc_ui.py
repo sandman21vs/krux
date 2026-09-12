@@ -678,3 +678,57 @@ def test_a_datum_comes_back_as_what_was_written(nfc_on, mocker, written, expecte
 
     assert captured["contents"] == expected
     assert isinstance(captured["contents"], type(expected))
+
+
+# ---------- Parity with the SD card and QR paths ----------
+
+
+def test_the_overwrite_warning_says_what_is_at_stake(nfc_on, mocker):
+    """Shaped like the SD card's, which names the file it would replace before
+    asking. "Overwrite?" alone does not say what is about to be lost."""
+    from krux.pages.nfc_ui import StoreOnNFC
+    from krux.display import BOTTOM_PROMPT_LINE
+    from krux.input import BUTTON_ENTER
+
+    mock_nfc(mocker, has_record=True)
+    page = StoreOnNFC(create_ctx(mocker, [BUTTON_ENTER, BUTTON_ENTER]))
+    mocker.spy(page, "prompt")
+    page.write(ENVELOPE, "abcd1234")
+
+    page.prompt.assert_any_call("Overwrite?", BOTTOM_PROMPT_LINE)
+
+
+def test_a_write_says_processing_like_the_sd_card_does(nfc_on, mocker):
+    from krux.pages.nfc_ui import StoreOnNFC
+    from krux.input import BUTTON_ENTER
+
+    mock_nfc(mocker)
+    ctx = create_ctx(mocker, [BUTTON_ENTER])
+    StoreOnNFC(ctx).write(ENVELOPE, "abcd1234")
+
+    shown = [call[0][0] for call in ctx.display.draw_centered_text.call_args_list]
+    assert any("Processing" in str(text) for text in shown)
+
+
+def test_a_failed_descriptor_read_says_it_once(nfc_on, mocker, tdata):
+    """The page already reports why. Falling through to the shared handler
+    would stack a second "Failed to load" on top of it."""
+    from krux.pages.home_pages.wallet_descriptor import WalletDescriptor
+    from krux.wallet import Wallet
+    from krux.nfc import NFCNotFound
+    from krux.input import BUTTON_ENTER, BUTTON_PAGE
+
+    nfc = mock_nfc(mocker)
+    nfc.read_record.side_effect = NFCNotFound("no record")
+
+    btn_seq = [
+        BUTTON_ENTER,  # Load?
+        BUTTON_PAGE,  # -> Load from SD card
+        BUTTON_PAGE,  # -> Load from NFC card
+        BUTTON_ENTER,  # Load from NFC card
+    ]
+    ctx = create_ctx(mocker, btn_seq, Wallet(tdata.MULTISIG_12_WORD_KEY))
+    WalletDescriptor(ctx).wallet()
+
+    assert ctx.display.flash_text.call_count == 1
+    assert not ctx.wallet.is_loaded()

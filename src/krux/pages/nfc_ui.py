@@ -139,14 +139,22 @@ class StoreOnNFC(NFCTapPage):
             if not self.wait_for_tag(t("Store on NFC Card")):
                 return False
             if self.nfc.has_record():
+                # Say what is at stake before asking, as the SD card does when
+                # a filename is already taken. "Overwrite?" on its own does not
+                # tell anyone what they are about to lose.
                 self.ctx.display.clear()
-                if not self.prompt(t("Overwrite?"), self.ctx.display.height() // 2):
+                self.ctx.display.draw_centered_text(
+                    t("This card already holds a Krux record.")
+                )
+                if not self.prompt(t("Overwrite?"), BOTTOM_PROMPT_LINE):
                     return False
                 # Ask for the card again rather than trusting the earlier poll:
                 # the prompt was up in between, and the card only had to drift a
                 # centimetre.
                 if not self.wait_for_tag(t("Store on NFC Card")):
                     return False
+            self.ctx.display.clear()
+            self.ctx.display.draw_centered_text(t("Processing…"))
             try:
                 self.nfc.write_record(kef_envelope, record_type)
             except NFCSizeError:

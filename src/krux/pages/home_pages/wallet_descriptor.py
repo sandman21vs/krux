@@ -126,8 +126,11 @@ class WalletDescriptor(Page):
             utils.print_standard_qr(wallet_data, qr_format, title)
 
             if Settings().hardware.nfc.enabled:
+                # Shaped like the SD card offer below it: the title on screen,
+                # a question underneath.
                 self.ctx.display.clear()
-                if self.prompt(t("Store on NFC Card"), self.ctx.display.height() // 2):
+                self.ctx.display.draw_centered_text(title + ":", highlight_prefix=":")
+                if self.prompt(t("Store on NFC card?"), BOTTOM_PROMPT_LINE):
                     from ..nfc_ui import StoreOnNFC
 
                     if is_encrypted:
@@ -207,7 +210,8 @@ class WalletDescriptor(Page):
             qr_format = FORMAT_NONE
             wallet_data = LoadFromNFC(self.ctx).read(RECORD_DESCRIPTOR)
             if wallet_data is None:
-                # The page already said why, or the user left it
+                # The page already said why, or the user cancelled it. Falling
+                # through would add a second "Failed to load" on top.
                 return None
         else:  # Cancel
             return None
