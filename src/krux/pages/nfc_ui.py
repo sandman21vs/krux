@@ -183,6 +183,49 @@ class StoreOnNFC(NFCTapPage):
         return MENU_CONTINUE
 
 
+class EraseNFC(NFCTapPage):
+    """Wipes the data area of a card"""
+
+    def erase(self):
+        """Asks for a card, confirms, and zeroes every data block on it"""
+        from ..nfc import NFCError
+
+        if not self.open_reader():
+            return MENU_CONTINUE
+        try:
+            if not self.wait_for_tag(t("Erase NFC Card")):
+                return MENU_CONTINUE
+
+            # No has_record() probe first. Erasing takes the whole data area,
+            # so "no Krux record here" would be the wrong thing to reassure
+            # anyone with - the card may be carrying plenty that Krux cannot
+            # see, and all of it is about to go.
+            self.ctx.display.clear()
+            if not self.prompt(
+                t("Erase all data on this card?"), self.ctx.display.height() // 2
+            ):
+                return MENU_CONTINUE
+            # The prompt was up in between, and the card only had to drift a
+            # centimetre.
+            if not self.wait_for_tag(t("Erase NFC Card")):
+                return MENU_CONTINUE
+
+            self.ctx.display.clear()
+            self.ctx.display.draw_centered_text(t("Processing…"))
+            try:
+                self.nfc.erase()
+            except NFCError:
+                # A card pulled away mid erase leaves part of the data area
+                # written and part not, so this is not "nothing happened".
+                self.flash_error(t("Failed to erase card"))
+                return MENU_CONTINUE
+        finally:
+            self.close_reader()
+
+        self.flash_success(t("Card erased"))
+        return MENU_CONTINUE
+
+
 class LoadFromNFC(NFCTapPage):
     """Reads a KEF envelope off a card"""
 

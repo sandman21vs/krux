@@ -563,3 +563,64 @@ def test_a_card_that_stops_answering_mid_read_fails(m5stickv):
     tag.frame = lambda data, bits: None
     with pytest.raises(NFCError):
         nfc.read_record()
+
+
+def test_erase_clears_every_data_block(m5stickv):
+    """Every data block, not just the header: an envelope left behind can be
+    carried off and attacked offline."""
+    from krux.nfc import MF_DATA_BLOCKS, NFC
+
+    tag = FakeClassic()
+    nfc = make_nfc(FakeI2C(tag))
+    nfc.write_record(bytes(range(60)))
+    assert nfc.has_record()
+
+    nfc.erase()
+
+    assert not nfc.has_record()
+    touched = [NFC._block(i) for i in range(MF_DATA_BLOCKS)]
+    for block in touched:
+        assert tag.blocks[block] == bytearray(16), "block %d survived" % block
+
+
+def test_erase_reaches_past_the_record_ceiling(m5stickv):
+    """The last two data blocks are outside any record, so write() cannot
+    address them. Erase still has to, or bytes from another tool stay put."""
+    from krux.nfc import MF_DATA_BLOCKS, MAX_CAPACITY, MF_BLOCK_SIZE, NFC
+
+    tag = FakeClassic()
+    nfc = make_nfc(FakeI2C(tag))
+
+    beyond = [
+        NFC._block(i) for i in range(MAX_CAPACITY // MF_BLOCK_SIZE, MF_DATA_BLOCKS)
+    ]
+    assert beyond, "the ceiling is supposed to leave blocks unaddressable"
+    for block in beyond:
+        tag.blocks[block] = bytearray(b"\xa5" * 16)
+
+    nfc.erase()
+    for block in beyond:
+        assert tag.blocks[block] == bytearray(16)
+
+
+def test_erase_never_touches_a_trailer_or_block_zero(m5stickv):
+    tag = FakeClassic()
+    for block in range(64):
+        tag.blocks[block] = bytearray(b"\x5a" * 16)
+    nfc = make_nfc(FakeI2C(tag))
+
+    nfc.erase()
+
+    assert tag.blocks[0] == bytearray(b"\x5a" * 16)
+    for block in range(3, 64, 4):
+        assert tag.blocks[block] == bytearray(b"\x5a" * 16), (
+            "trailer %d written" % block
+        )
+
+
+def test_erase_without_a_tag_is_an_nfc_error(m5stickv):
+    from krux.nfc import NFCError
+
+    nfc = make_nfc(FakeI2C(), select=False)
+    with pytest.raises(NFCError):
+        nfc.erase()

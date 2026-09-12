@@ -300,6 +300,105 @@ def test_a_card_that_is_not_a_krux_backup_loads_nothing(
     ctx.display.flash_text.assert_called_once()
 
 
+# ---------- Erase ----------
+
+
+def test_erase_wipes_the_card(nfc_on, mocker):
+    from krux.pages.nfc_ui import EraseNFC
+    from krux.input import BUTTON_ENTER
+
+    nfc = mock_nfc(mocker, has_record=True)
+    EraseNFC(create_ctx(mocker, [BUTTON_ENTER])).erase()
+
+    nfc.erase.assert_called_once_with()
+    nfc.field.assert_any_call(True)
+    nfc.deinit.assert_called_once()
+
+
+def test_erase_asks_first(nfc_on, mocker):
+    from krux.pages.nfc_ui import EraseNFC
+    from krux.input import BUTTON_PAGE
+
+    nfc = mock_nfc(mocker, has_record=True)
+    # BUTTON_PAGE answers "No" on a minimal display
+    EraseNFC(create_ctx(mocker, [BUTTON_PAGE])).erase()
+
+    nfc.erase.assert_not_called()
+    nfc.deinit.assert_called_once()
+
+
+def test_erase_does_not_probe_for_a_record_first(nfc_on, mocker):
+    """It takes the whole data area, so what Krux recognises is beside the
+    point and reporting it would reassure the wrong way."""
+    from krux.pages.nfc_ui import EraseNFC
+    from krux.input import BUTTON_ENTER
+
+    nfc = mock_nfc(mocker)
+    EraseNFC(create_ctx(mocker, [BUTTON_ENTER])).erase()
+
+    nfc.has_record.assert_not_called()
+    nfc.erase.assert_called_once_with()
+
+
+def test_a_card_pulled_away_mid_erase_is_reported(nfc_on, mocker):
+    from krux.pages.nfc_ui import EraseNFC
+    from krux.nfc import NFCError
+    from krux.input import BUTTON_ENTER
+
+    nfc = mock_nfc(mocker)
+    nfc.erase.side_effect = NFCError("write not acknowledged")
+
+    ctx = create_ctx(mocker, [BUTTON_ENTER])
+    EraseNFC(ctx).erase()
+
+    ctx.display.flash_text.assert_called_once()
+    nfc.deinit.assert_called_once()
+
+
+def test_leaving_the_erase_tap_page_wipes_nothing(nfc_on, mocker):
+    from krux.pages.nfc_ui import EraseNFC
+    from krux.input import BUTTON_PAGE
+    from krux.nfc import NFCNotFound
+
+    nfc = mock_nfc(mocker)
+    nfc.poll.side_effect = NFCNotFound("No card")
+
+    EraseNFC(create_ctx(mocker, [BUTTON_PAGE])).erase()
+
+    nfc.erase.assert_not_called()
+    nfc.field.assert_any_call(False)
+    nfc.deinit.assert_called_once()
+
+
+def test_a_card_that_drifts_off_after_the_prompt_is_not_erased(nfc_on, mocker):
+    """The confirmation screen was up in between, and the card only had to move
+    a centimetre. It is asked for again rather than trusted."""
+    from krux.pages.nfc_ui import EraseNFC
+    from krux.nfc import NFCNotFound
+    from krux.input import BUTTON_ENTER, BUTTON_PAGE
+
+    nfc = mock_nfc(mocker)
+    nfc.poll.side_effect = [None] + [NFCNotFound("gone")] * 10
+
+    EraseNFC(create_ctx(mocker, [BUTTON_ENTER, BUTTON_PAGE])).erase()
+
+    nfc.erase.assert_not_called()
+    nfc.deinit.assert_called_once()
+
+
+def test_erase_without_a_reader_touches_nothing(nfc_on, mocker):
+    from krux.pages.nfc_ui import EraseNFC
+    from krux.nfc import NFCNotFound
+
+    nfc = mock_nfc(mocker)
+    nfc.init.side_effect = NFCNotFound("No reader")
+
+    EraseNFC(create_ctx(mocker, [])).erase()
+
+    nfc.field.assert_not_called()
+    nfc.erase.assert_not_called()
+
+
 # ---------- Menu gating ----------
 
 
@@ -348,3 +447,45 @@ def test_backup_menu_offers_nfc_when_it_is_on(nfc_on, mocker):
     page = encryption_ui.EncryptMnemonic(create_ctx(mocker, []))
     labels = _menu_labels(mocker, encryption_ui, page.encrypt_menu)
     assert labels.index("Store on NFC Card") == 2
+
+
+def _tools_menu(mocker):
+    import krux.pages.tools as tools
+
+    captured = []
+
+    class FakeMenu:
+        back_index = 0
+
+        def __init__(self, _ctx, items, **_kwargs):
+            captured.extend(items)
+
+        def run_loop(self, *_args, **_kwargs):
+            return 0, None
+
+    mocker.patch.object(tools, "Menu", FakeMenu)
+    tools.Tools(create_ctx(mocker, []))
+    return [item[0] for item in captured]
+
+
+def test_tools_hides_the_erase_tool_while_nfc_is_off(m5stickv, mocker):
+    from krux.krux_settings import Settings
+
+    Settings().hardware.nfc.enabled = False
+    labels = _tools_menu(mocker)
+    assert "Descriptor Addresses" in labels
+    assert not any("NFC" in label for label in labels)
+
+
+def test_tools_offers_the_erase_tool_when_nfc_is_on(nfc_on, mocker):
+    assert "Erase NFC Card" in _tools_menu(mocker)
+
+
+def test_the_tools_entry_reaches_the_erase_page(nfc_on, mocker):
+    from krux.pages.tools import Tools
+    from krux.input import BUTTON_ENTER
+
+    nfc = mock_nfc(mocker)
+    Tools(create_ctx(mocker, [BUTTON_ENTER])).erase_nfc_card()
+
+    nfc.erase.assert_called_once_with()

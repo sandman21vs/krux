@@ -378,6 +378,33 @@ class NFC:
             self._ack(chunk)
             done += MF_BLOCK_SIZE
 
+    def erase(self):
+        """Zeroes every data block on the selected tag.
+
+        Not the header alone. A record whose header is gone is unreadable, not
+        absent: the KEF envelope is still lying on the card, and one taken off a
+        discarded backup can be attacked offline for as long as its password
+        holds. So the whole data area goes.
+
+        That includes the two blocks past the record ceiling. A record can never
+        reach them, but MAX_PAYLOAD is a bound on what Krux will allocate for a
+        stranger's card, not a statement about what is written on this one - a
+        card that has been through another tool, or a future Krux with a higher
+        ceiling, may well have bytes there.
+
+        Block 0 and the sector trailers are never touched: _block refuses them,
+        and a corrupted trailer bricks its sector permanently.
+        """
+        if self.tag is None:
+            raise NFCError("No tag selected")
+        uid, _ = self.tag
+        blank = bytes(MF_BLOCK_SIZE)
+        for index in range(MF_DATA_BLOCKS):
+            block = self._block(index)
+            self._authenticate(uid, block)
+            self._ack(bytes([CMD_MF_WRITE, block]))
+            self._ack(blank)
+
     # ---------- Records ----------
 
     def has_record(self):

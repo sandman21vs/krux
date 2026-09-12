@@ -87,6 +87,26 @@ and a taproot miniscript can pass 880, against a payload ceiling of 704. Sealing
 deflates before it encrypts — roughly 345 and 470 — so a large descriptor may
 fit encrypted and not fit plaintext. A card that cannot hold it says so.
 
+## Erasing a card
+
+**Tools → Erase NFC Card** zeroes every data block on the card, after asking to
+see the card, confirming, and asking to see it again.
+
+It wipes the whole data area rather than just the record header, and the
+difference matters. A card whose header is gone reads as blank to Krux, but the
+KEF envelope is still lying on it — and an envelope carried off a discarded
+backup can be attacked offline for as long as its password holds. Erasing the
+header is reuse, not destruction.
+
+The wipe reaches past the record ceiling too. No record can occupy the last two
+data blocks, but the ceiling bounds what Krux will allocate for a stranger's
+card, not what is written on this one.
+
+Sector trailers and block 0 are never written, so this cannot brick a sector —
+and for the same reason it **cannot rescue an NDEF-formatted card**. Those use
+different sector keys, so Krux cannot authenticate to them at all; restoring one
+means rewriting its trailers, which any tag tool will do.
+
 ## Supported tags
 
 | Family | SAK | Usable bytes |
