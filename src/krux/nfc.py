@@ -117,13 +117,19 @@ def parse_header(header, capacity, record_type=None):
 
     record_type None accepts any type Krux knows how to write, which is what
     "is there already a record here" has to ask before overwriting one. A caller
-    that is about to parse the payload names the type it can parse instead, and
-    anything else reads as no record.
+    that is about to parse the payload names the type it can parse instead - one
+    type, or several for a caller that can parse several - and anything else
+    reads as no record.
     """
     if len(header) < HEADER_LEN or bytes(header[:4]) != RECORD_MAGIC:
         raise NFCNotFound("Not a Krux record")
 
-    wanted = KNOWN_RECORD_TYPES if record_type is None else (record_type,)
+    if record_type is None:
+        wanted = KNOWN_RECORD_TYPES
+    elif isinstance(record_type, int):
+        wanted = (record_type,)
+    else:
+        wanted = tuple(record_type)
 
     # A known type, and reserved bytes that must be zero: it denies the field
     # as a covert channel and stops stale bytes from silently acquiring meaning

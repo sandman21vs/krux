@@ -637,3 +637,33 @@ def test_the_parametrized_type_lists_cover_every_known_type(m5stickv):
     import krux.nfc as nfc
 
     assert nfc.KNOWN_RECORD_TYPES == (1, 2, 3, 4)
+
+
+@pytest.mark.parametrize("record_type", [1, 2, 3, 4])
+def test_a_caller_can_name_several_acceptable_types(m5stickv, record_type):
+    """The datum tool asks for every type at once, so a tuple has to mean "any
+    of these". Wrapping it in another tuple instead refuses every card, which is
+    what shipped: the datum tool could not read a card it had just written.
+
+    This goes through the card stack rather than a mocked facade, because the
+    test that let the bug through asserted the call and not the outcome.
+    """
+    from krux.nfc import KNOWN_RECORD_TYPES
+
+    nfc = make_nfc(FakeI2C(FakeClassic()))
+    payload = bytes(range(40))
+    nfc.write_record(payload, record_type)
+
+    assert nfc.read_record(KNOWN_RECORD_TYPES) == payload
+    assert nfc.read_record(list(KNOWN_RECORD_TYPES)) == payload
+    assert nfc.read_record(record_type) == payload
+
+
+def test_naming_several_types_still_refuses_the_ones_left_out(m5stickv):
+    from krux.nfc import RECORD_KEF, RECORD_DESCRIPTOR, RECORD_DATUM, NFCNotFound
+
+    nfc = make_nfc(FakeI2C(FakeClassic()))
+    nfc.write_record(bytes(range(40)), RECORD_DATUM)
+
+    with pytest.raises(NFCNotFound):
+        nfc.read_record((RECORD_KEF, RECORD_DESCRIPTOR))
