@@ -77,30 +77,41 @@ bus and detaches again without energizing the antenna.
 | Record | Written from | Read from |
 |--------|--------------|-----------|
 | Encrypted mnemonic | Backup → Encrypted → Store on NFC Card | Load Mnemonic → From NFC Card |
-| Wallet output descriptor | Wallet Descriptor → Encrypted | Wallet Descriptor → Load from NFC card |
+| Wallet output descriptor | Wallet Descriptor → Plaintext or Encrypted | Wallet Descriptor → Load from NFC card |
 
 Each record carries a type byte, and a reader asks for the type it can parse, so
 a descriptor card offered to the mnemonic loader — or a seed card offered to the
 wallet — reads as an empty card. Overwriting still warns for either, because the
 question "is something already here" is asked without a type.
 
-### Why descriptors are encrypted only
+A descriptor record holds either a sealed envelope or a bare descriptor, exactly
+as a `.txt` on an SD card may; Krux tells them apart on read. **A mnemonic
+record is always sealed.** The mnemonic loader accepts nothing else, and no part
+of Krux writes a seed to a card in the clear.
 
-The plaintext/encrypted choice the descriptor export offers for QR codes and SD
-files does not extend to cards. Three reasons, in order of weight:
+### What a plaintext descriptor record costs
 
-- **No integrity check.** The on-card format carries no checksum on purpose: the
-  KEF envelope authenticates itself, so a half-written or decaying card fails to
-  decrypt instead of returning damaged bytes. A descriptor string has no
-  checksum of its own to fall back on — Krux writes the descriptor as embit
-  serializes it, without the BIP-380 trailer — so a plaintext record on a
-  block-addressed, zero-padded medium would have nothing checking it at all.
-- **Size.** Sealing deflates before it encrypts. A 2-of-3 is about 450 bytes
-  plaintext and a taproot miniscript can pass 880, against a payload ceiling of
-  704; compressed they are roughly 345 and 470. Encrypted descriptors fit where
-  plaintext ones would not.
+Two things the envelope was doing for free:
+
 - **Privacy.** A descriptor holds every xpub in the wallet, which is its whole
-  history. Plaintext means any reader brought near the card gets it.
+  history, and an unsealed card gives it to any reader brought near it. Choose
+  plaintext for a card the way you would choose it for a sheet of paper.
+- **Authentication.** The on-card format has no checksum, by design: a sealed
+  record is authenticated by its envelope, so a half-written or decaying card
+  fails to decrypt rather than returning damaged bytes. An unsealed record has
+  to bring its own, so Krux writes it with its **BIP-380 checksum and refuses a
+  card without a matching one**.
+
+  The checksum is verified by Krux, not by the descriptor parser: embit accepts
+  a descriptor whether or not its checksum agrees. That matters more than it
+  sounds. Only the xpubs carry integrity of their own, being base58check — a
+  flipped bit in a fingerprint, a derivation path, the threshold or the script
+  wrapper is accepted in silence and points the wallet at different addresses.
+
+Size is the remaining limit either way. A 2-of-3 is about 450 bytes plaintext
+and a taproot miniscript can pass 880, against a payload ceiling of 704. Sealing
+deflates before it encrypts — roughly 345 and 470 — so a large descriptor may
+fit encrypted and not fit plaintext. A card that cannot hold it says so.
 
 ## Supported tags
 
