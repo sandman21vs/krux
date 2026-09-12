@@ -46,6 +46,28 @@ from ...key import FINGERPRINT_SYMBOL, DERIVATION_PATH_SYMBOL, P2TR
 from ...kboard import kboard
 
 
+def unsealed_card_is_intact(payload):
+    """True when an unsealed card payload carries a matching BIP-380 checksum.
+
+    A sealed record needs nothing here: the envelope is authenticated, so a
+    half-written or decaying card fails to decrypt. An unsealed one has no such
+    backstop, and the on-card format has no checksum of its own on purpose. The
+    descriptor's own checksum is the substitute, and it has to be checked rather
+    than trusted, because embit parses a descriptor whether or not the checksum
+    matches - a flipped bit in a derivation path or a fingerprint would
+    otherwise be accepted and quietly point the wallet at other addresses. The
+    xpubs defend themselves, being base58check; nothing else in the string does.
+    """
+    from embit.descriptor.checksum import checksum
+
+    try:
+        text = payload.decode() if isinstance(payload, bytes) else payload
+        body, separator, provided = text.partition("#")
+        return bool(separator) and checksum(body) == provided
+    except Exception:  # pylint: disable=broad-except
+        return False
+
+
 class WalletDescriptor(Page):
     """Page to load and export wallet descriptor"""
 
@@ -103,17 +125,23 @@ class WalletDescriptor(Page):
             utils = Utils(self.ctx)
             utils.print_standard_qr(wallet_data, qr_format, title)
 
-            # A card takes the sealed envelope, so it is only offered for the
-            # encrypted export. A plaintext descriptor would reach the card with
-            # no integrity check at all - to_string() carries no BIP-380
-            # checksum - and would hand every xpub to whoever waves a reader
-            # past it.
-            if is_encrypted and Settings().hardware.nfc.enabled:
+            if Settings().hardware.nfc.enabled:
                 self.ctx.display.clear()
                 if self.prompt(t("Store on NFC Card"), self.ctx.display.height() // 2):
                     from ..nfc_ui import StoreOnNFC
 
-                    StoreOnNFC(self.ctx).write_descriptor(wallet_data)
+                    if is_encrypted:
+                        card_data = wallet_data
+                    else:
+                        # The checksum is what a plaintext record has instead of
+                        # an envelope, so it is written even though embit does
+                        # not ask for one. Reading one requires it.
+                        from embit.descriptor.checksum import add_checksum
+
+                        card_data = add_checksum(
+                            self.ctx.wallet.descriptor.to_string()
+                        ).encode()
+                    StoreOnNFC(self.ctx).write_descriptor(card_data)
 
             # Try to save the Wallet output descriptor on the SD card
             if self.has_sd_card() and not self.ctx.wallet.persisted:
@@ -139,6 +167,8 @@ class WalletDescriptor(Page):
         """Loads and decrypts wallet data from camera or SD card"""
         persisted = False
         wallet_data = None
+
+        from_nfc = False
 
         load_method = self.load_method(nfc=True)
         if load_method == LOAD_FROM_CAMERA:
@@ -166,12 +196,14 @@ class WalletDescriptor(Page):
                 return None
             persisted = True
         elif load_method == LOAD_FROM_NFC:
-            # The card hands back a sealed envelope and nothing else. What it
-            # holds is decided below by the same decryption and the same
-            # descriptor parser a QR code or an SD card file goes through.
+            # The card hands back a descriptor record, sealed or not, the same
+            # way a .txt on SD may hold either. What it holds is decided below
+            # by the same decryption and the same descriptor parser a QR code or
+            # an SD card file goes through.
             from ..nfc_ui import LoadFromNFC
             from ...nfc import RECORD_DESCRIPTOR
 
+            from_nfc = True
             qr_format = FORMAT_NONE
             wallet_data = LoadFromNFC(self.ctx).read(RECORD_DESCRIPTOR)
             if wallet_data is None:
@@ -200,7 +232,9 @@ class WalletDescriptor(Page):
             return None
         except ValueError:
             # ValueError=not KEF or declined to decrypt
-            pass
+            if from_nfc and not unsealed_card_is_intact(wallet_data):
+                self.flash_error(t("Failed to load"))
+                return None
 
         return wallet_data, qr_format, persisted
 
