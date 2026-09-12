@@ -21,10 +21,11 @@
 # THE SOFTWARE.
 """What the tag layer needs from a reader chip, and nothing else.
 
-Two chips implement this: the WS1850S on I2C and the PN5180 on SPI. They share
-no registers and barely share a vocabulary, so the boundary is drawn at frames
-rather than at anything electrical. Above this line nothing knows which chip is
-present; below it, nothing knows what a record is.
+One chip implements this today, the WS1850S on I2C. The boundary is drawn at
+frames rather than at anything electrical, so above this line nothing knows
+which chip is present and below it nothing knows what a record is. That is
+worth keeping with a single driver: it is what a second one would plug into,
+and it is why the tag layer has no registers in it.
 
 A reader is responsible for: bringing the chip up, energizing the antenna,
 putting one frame on the air and handing back what came off it, computing a
@@ -46,9 +47,8 @@ class NFCSizeError(NFCError):
     """A reply did not fit its buffer, or a payload does not fit the tag"""
 
 
-# The smallest reader FIFO of the supported chips, applied to both: no frame
-# may exceed it. A CRC_A is two bytes, and receive buffers must have room for
-# it, because the CRC arrives with the frame.
+# No frame may exceed the reader FIFO. A CRC_A is two bytes, and receive
+# buffers must have room for it, because the CRC arrives with the frame.
 FIFO_SIZE = 64
 CRC_LEN = 2
 
@@ -60,11 +60,6 @@ CRC_TIMEOUT_MS = 20
 MAX_POLLS = 4000
 
 MF_DEFAULT_KEY = b"\xff\xff\xff\xff\xff\xff"
-
-# Which chip a build talks to. Named here rather than in either driver so the
-# settings and the factory agree without importing a driver to find out.
-READER_I2C = "ws1850s"
-READER_SPI = "pn5180"
 
 
 class Reader:
@@ -120,18 +115,3 @@ class Reader:
         if self.calc_crc(reply[:-2]) != reply[-2:]:
             raise NFCError("Bad CRC")
         return reply[:-2]
-
-
-def crc_a(data):
-    """CRC_A in software, for a chip that will not compute one on demand.
-
-    The PN5180 frames its CRC inline during transmission and offers no way to
-    ask for the value, so it computes this itself. Preset 0x6363, polynomial
-    0x8408, returned low byte first, which is the order it goes on the air.
-    """
-    crc = 0x6363
-    for byte in data:
-        crc ^= byte
-        for _ in range(8):
-            crc = (crc >> 1) ^ 0x8408 if crc & 1 else crc >> 1
-    return bytes([crc & 0xFF, (crc >> 8) & 0xFF])

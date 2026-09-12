@@ -21,9 +21,9 @@
 # THE SOFTWARE.
 """NFC card storage - KEF envelopes on ISO14443A tags.
 
-Readers: a WS1850S on I2C (M5Stack RFID Unit 2) or a PN5180 on SPI, chosen
-under Settings > Hardware > NFC and loaded only when used. Tags: MIFARE
-Classic 1K, presented to callers as one flat byte array.
+Reader: a WS1850S on I2C (M5Stack RFID Unit 2), configured under
+Settings > Hardware > NFC and loaded only when used. Tags: MIFARE Classic 1K,
+presented to callers as one flat byte array.
 
 This module is the tag layer and the record layer. It knows how to wake a card,
 select it, walk its blocks and read a record out of them, and it knows none of
@@ -63,7 +63,6 @@ from .nfc_reader import (
     NFCSizeError,
     FIFO_SIZE,
     CRC_LEN,
-    READER_SPI,
 )
 
 # Re-exported so callers keep importing their errors from krux.nfc
@@ -152,28 +151,17 @@ def build_header(length, capacity, record_type=RECORD_KEF):
 
 
 def open_reader(settings=None):
-    """Builds the reader the settings ask for, importing only that one.
+    """Builds the reader, importing the driver only when one is asked for.
 
-    Both drivers are several hundred lines of constants and methods, and the
-    device has about 1 MB of heap; whichever module is not in use should not be
-    resident. That is why this is a function and not two imports at the top.
+    The driver is several hundred lines of constants and methods and the device
+    has about 1 MB of heap, so it should not be resident on a device whose owner
+    never switched NFC on. That is why this is a function and not an import at
+    the top.
     """
     if settings is None:
         from .krux_settings import Settings
 
         settings = Settings().hardware.nfc
-
-    if settings.reader == READER_SPI:
-        from .nfc_pn5180 import PN5180
-
-        return PN5180(
-            settings.sck_pin,
-            settings.mosi_pin,
-            settings.miso_pin,
-            settings.nss_pin,
-            settings.busy_pin,
-            settings.rst_pin,
-        )
 
     from .nfc_ws1850s import WS1850S
 
