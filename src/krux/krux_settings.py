@@ -43,6 +43,7 @@ from .key import (
 )
 
 from .kboard import kboard
+from .nfc_reader import READER_I2C, READER_SPI
 
 BAUDRATES = [1200, 2400, 4800, 9600, 19200, 38400, 57600, 115200]
 
@@ -64,6 +65,17 @@ DEFAULT_RX_PIN = (
     if "CONNEXT_B" in board.config["board_info"]
     else 34
 )
+
+# An SPI reader needs six lines where an I2C one needs two, so these are pins
+# rather than a bus. The Amigo defaults put five of them on one expansion
+# connector, which also carries GND and 3V3, and send only RESET to the other -
+# it is the one line with no timing to lose.
+DEFAULT_NFC_SCK_PIN = 28 if kboard.is_amigo else 0
+DEFAULT_NFC_MOSI_PIN = 29 if kboard.is_amigo else 0
+DEFAULT_NFC_MISO_PIN = 30 if kboard.is_amigo else 0
+DEFAULT_NFC_NSS_PIN = 25 if kboard.is_amigo else 0
+DEFAULT_NFC_BUSY_PIN = 22 if kboard.is_amigo else 0
+DEFAULT_NFC_RST_PIN = 31 if kboard.is_amigo else 0
 
 THERMAL_ADAFRUIT_TXT = "thermal/adafruit"
 CNC_FILE_DRIVER = "cnc/file"
@@ -376,15 +388,29 @@ class NFCSettings(SettingsNamespace):
 
     namespace = "settings.hardware.nfc"
     enabled = CategorySetting("enabled", False, [False, True])
+    reader = CategorySetting("reader", READER_I2C, [READER_I2C, READER_SPI])
     sda_pin = NumberSetting(int, "sda_pin", DEFAULT_TX_PIN, [0, 47])
     scl_pin = NumberSetting(int, "scl_pin", DEFAULT_RX_PIN, [0, 47])
+    sck_pin = NumberSetting(int, "sck_pin", DEFAULT_NFC_SCK_PIN, [0, 47])
+    mosi_pin = NumberSetting(int, "mosi_pin", DEFAULT_NFC_MOSI_PIN, [0, 47])
+    miso_pin = NumberSetting(int, "miso_pin", DEFAULT_NFC_MISO_PIN, [0, 47])
+    nss_pin = NumberSetting(int, "nss_pin", DEFAULT_NFC_NSS_PIN, [0, 47])
+    busy_pin = NumberSetting(int, "busy_pin", DEFAULT_NFC_BUSY_PIN, [0, 47])
+    rst_pin = NumberSetting(int, "rst_pin", DEFAULT_NFC_RST_PIN, [0, 47])
 
     def label(self, attr):
         """Returns a label for UI when given a setting name or namespace"""
         return {
             "enabled": t("Enabled"),
+            "reader": t("Reader"),
             "sda_pin": t("SDA Pin"),
             "scl_pin": t("SCL Pin"),
+            "sck_pin": t("SCK Pin"),
+            "mosi_pin": t("MOSI Pin"),
+            "miso_pin": t("MISO Pin"),
+            "nss_pin": t("NSS Pin"),
+            "busy_pin": t("BUSY Pin"),
+            "rst_pin": t("RST Pin"),
         }[attr]
 
 

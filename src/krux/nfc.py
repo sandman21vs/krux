@@ -1,6 +1,6 @@
 # The MIT License (MIT)
 
-# Copyright (c) 2021-2024 Krux contributors
+# Copyright (c) 2021-2026 Krux contributors
 
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to deal
@@ -21,9 +21,14 @@
 # THE SOFTWARE.
 """NFC card storage - KEF envelopes on ISO14443A tags.
 
-Reader: WS1850S (M5Stack RFID Unit 2) on an I2C bus opened from the pins
-configured under Settings > Hardware > NFC. Tags: MIFARE Classic 1K, presented
-to callers as one flat byte array.
+Readers: a WS1850S on I2C (M5Stack RFID Unit 2) or a PN5180 on SPI, chosen
+under Settings > Hardware > NFC and loaded only when used. Tags: MIFARE
+Classic 1K, presented to callers as one flat byte array.
+
+This module is the tag layer and the record layer. It knows how to wake a card,
+select it, walk its blocks and read a record out of them, and it knows none of
+that in terms of any particular chip - the reader behind self.reader answers
+the eight calls in nfc_reader.py and nothing more is asked of it.
 
 A card is input where an attacker picked every byte, and it only has to be held
 near the device. Every layer here refuses anything that is not exactly what
@@ -43,11 +48,17 @@ reads on the other. There is no checksum: the KEF envelope is authenticated, so
 a half-written or decaying card fails to decrypt.
 """
 
-import time
-import board
+from .nfc_reader import (
+    NFCError,
+    NFCNotFound,
+    NFCSizeError,
+    FIFO_SIZE,
+    CRC_LEN,
+    READER_SPI,
+)
 
-WS1850S_ADDR = 0x28
-I2C_FREQ = 400000
+# Re-exported so callers keep importing their errors from krux.nfc
+__all__ = ("NFC", "NFCError", "NFCNotFound", "NFCSizeError")
 
 HEADER_LEN = 16
 RECORD_MAGIC = b"KRN1"
@@ -58,61 +69,13 @@ RECORD_KEF = 1
 # from driving a large allocation on a device with about 1 MB of heap.
 MAX_PAYLOAD = 704
 
-# The reader's FIFO is 64 bytes; no frame can exceed it. A CRC_A is two bytes,
-# and receive buffers must have room for it: the CRC arrives with the frame.
-FIFO_SIZE = 64
-CRC_LEN = 2
-
 # PICC commands
 CMD_WUPA = 0x52
 CMD_HALT = 0x50
 CMD_SEL_CL1 = 0x93
 CMD_SEL_CL2 = 0x95
-CMD_AUTH_KEY_A = 0x60
 CMD_READ = 0x30
 CMD_MF_WRITE = 0xA0
-
-# Registers (MFRC522 compatible)
-REG_COMMAND = 0x01
-REG_COM_IRQ = 0x04
-REG_DIV_IRQ = 0x05
-REG_ERROR = 0x06
-REG_STATUS2 = 0x08
-REG_FIFO_DATA = 0x09
-REG_FIFO_LEVEL = 0x0A
-REG_CONTROL = 0x0C
-REG_BIT_FRAMING = 0x0D
-REG_MODE = 0x11
-REG_TX_CONTROL = 0x14
-REG_TX_ASK = 0x15
-REG_CRC_RESULT_H = 0x21
-REG_CRC_RESULT_L = 0x22
-REG_T_MODE = 0x2A
-REG_T_PRESCALER = 0x2B
-REG_T_RELOAD_H = 0x2C
-REG_T_RELOAD_L = 0x2D
-
-# Reader commands
-PCD_IDLE = 0x00
-PCD_CALC_CRC = 0x03
-PCD_TRANSCEIVE = 0x0C
-PCD_AUTHENT = 0x0E
-PCD_RESET = 0x0F
-
-# Any fatal ErrorReg bit means the frame is garbage. CRCErr is excluded because
-# framing without a CRC legitimately leaves it set.
-ERR_FATAL_MASK = 0x1B  # BufferOvfl | Coll | Parity | Protocol
-
-IRQ_TIMER = 0x01
-IRQ_IDLE = 0x10
-IRQ_RX = 0x20
-
-# An exchange is bounded three times over: the reader's own 25 ms timer, a wall
-# clock deadline in case the reader stops answering, and a poll cap so a clock
-# that never advances still cannot spin forever.
-EXCHANGE_TIMEOUT_MS = 60
-CRC_TIMEOUT_MS = 20
-MAX_POLLS = 4000
 
 # SAK values Krux accepts: MIFARE Classic 1K, the only family that has been
 # through a card. Anything else reads as an empty field - the point is to talk
@@ -125,26 +88,12 @@ CASCADE_TAG = 0x88
 # MIFARE Classic 1K geometry.
 MF_BLOCK_SIZE = 16
 MF_DATA_BLOCKS = 47  # 64 blocks less block 0 and 16 sector trailers
-MF_DEFAULT_KEY = b"\xff\xff\xff\xff\xff\xff"
 
 # A Classic READ answers with one whole block.
 READ_LEN = 16
 
 # Nothing larger than one record is ever addressable, whatever a tag claims.
 MAX_CAPACITY = MAX_PAYLOAD + HEADER_LEN
-
-
-class NFCError(Exception):
-    """Any NFC failure. The pages turn it into one short message, because the
-    exact reason a hostile card was refused is not for the screen."""
-
-
-class NFCNotFound(NFCError):
-    """No reader on the bus, no acceptable tag, or no record on the tag"""
-
-
-class NFCSizeError(NFCError):
-    """A reply did not fit its buffer, or a payload does not fit the tag"""
 
 
 def parse_header(header, capacity):
@@ -182,253 +131,76 @@ def build_header(length, capacity):
     return header
 
 
-class NFC:
-    """Reader, tag layer and record I/O.
+def open_reader(settings=None):
+    """Builds the reader the settings ask for, importing only that one.
 
-    The WS1850S is register compatible with the MFRC522 but does not report its
-    VersionReg values, so presence is probed by writing a register and reading
-    it back.
+    Both drivers are several hundred lines of constants and methods, and the
+    device has about 1 MB of heap; whichever module is not in use should not be
+    resident. That is why this is a function and not two imports at the top.
     """
-
-    def __init__(self, scl=None, sda=None, addr=WS1850S_ADDR):
+    if settings is None:
         from .krux_settings import Settings
 
         settings = Settings().hardware.nfc
-        self.scl = settings.scl_pin if scl is None else scl
-        self.sda = settings.sda_pin if sda is None else sda
-        self.addr = addr
-        self.i2c = None
-        self.ready = False
-        self.crypto_on = False
+
+    if settings.reader == READER_SPI:
+        from .nfc_pn5180 import PN5180
+
+        return PN5180(
+            settings.sck_pin,
+            settings.mosi_pin,
+            settings.miso_pin,
+            settings.nss_pin,
+            settings.busy_pin,
+            settings.rst_pin,
+        )
+
+    from .nfc_ws1850s import WS1850S
+
+    return WS1850S(settings.scl_pin, settings.sda_pin)
+
+
+class NFC:
+    """Tag layer and record I/O over any supported reader"""
+
+    def __init__(self, reader=None):
+        self.reader = open_reader() if reader is None else reader
         self.authed_sector = None
         self.tag = None
 
-    # ---------- Register access ----------
-
-    def _write(self, reg, val):
-        """Writes one register"""
-        self._raw(bytes([reg, val]))
-
-    def _raw(self, payload):
-        """Writes a register byte followed by data.
-
-        Both must travel in one transaction: the MFRC522 does not auto
-        increment, so every byte after the address lands in the same register.
-        """
-        try:
-            self.i2c.writeto(self.addr, payload)
-        except Exception as exc:
-            raise NFCError("I2C write failed") from exc
-
-    def _read(self, reg, length=1):
-        """Reads from a register. Reading FIFODataReg repeatedly drains it."""
-        try:
-            self.i2c.writeto(self.addr, bytes([reg]))
-            data = self.i2c.readfrom(self.addr, length)
-        except Exception as exc:
-            raise NFCError("I2C read failed") from exc
-        if data is None or len(data) != length:
-            raise NFCError("I2C short read")
-        return data
-
-    def _byte(self, reg):
-        """Reads a single register"""
-        return self._read(reg)[0]
-
-    def _mask(self, reg, mask, on):
-        """Sets or clears the masked bits of a register"""
-        val = self._byte(reg)
-        self._write(reg, val | mask if on else val & (~mask & 0xFF))
+    @property
+    def ready(self):
+        """True once the reader is up"""
+        return self.reader.ready
 
     # ---------- Lifecycle ----------
 
-    def _open_bus(self):
-        """Opens, or borrows, the I2C bus the reader sits on.
-
-        Wired to the board's own I2C pins the reader shares the existing bus
-        with the touch controller and PMU. Wired anywhere else - the UART
-        header, where an external module usually ends up - it gets a controller
-        of its own.
-        """
-        pins = board.config["krux"]["pins"]
-        if pins.get("I2C_SCL") == self.scl and pins.get("I2C_SDA") == self.sda:
-            from .i2c import i2c_bus
-
-            if i2c_bus is None:
-                raise NFCNotFound("No I2C bus")
-            return i2c_bus
-
-        from machine import I2C
-
-        try:
-            return I2C(I2C.I2C1, freq=I2C_FREQ, scl=self.scl, sda=self.sda)
-        except Exception as exc:
-            raise NFCNotFound("No I2C bus") from exc
-
     def init(self):
         """Brings the reader up with the field off. Idempotent."""
-        if self.ready:
-            return
-        self.i2c = self._open_bus()
-
-        # VersionReg is useless here, so write two patterns to a harmless
-        # register and read them back. A missing module fails the transfer.
-        for pattern in (0x55, 0xAA):
-            try:
-                self._write(REG_T_RELOAD_L, pattern)
-                if self._byte(REG_T_RELOAD_L) != pattern:
-                    raise NFCNotFound("No NFC reader")
-            except NFCError as exc:
-                raise NFCNotFound("No NFC reader") from exc
-
-        self._write(REG_COMMAND, PCD_RESET)
-        for _ in range(10):
-            time.sleep_ms(5)
-            try:
-                if not self._byte(REG_COMMAND) & 0x10:
-                    break
-            except NFCError:
-                pass
-        else:
-            raise NFCError("Reader reset timed out")
-
-        # Timer: TAuto, prescaler 0xA9 -> 40 kHz, reload 1000 -> 25 ms per
-        # exchange. This is what stops a silent tag from hanging a read.
-        for reg, val in (
-            (REG_T_MODE, 0x80),
-            (REG_T_PRESCALER, 0xA9),
-            (REG_T_RELOAD_H, 0x03),
-            (REG_T_RELOAD_L, 0xE8),
-            (REG_TX_ASK, 0x40),  # force 100% ASK
-            (REG_MODE, 0x3D),  # CRC preset 0x6363
-        ):
-            self._write(reg, val)
-
-        self.ready = True
-        self.crypto_on = False
-        self.field(False)  # callers energize the antenna deliberately
+        self.reader.init()
 
     def deinit(self):
         """Releases the tag and the reader, field off first"""
-        if self.ready:
+        if self.reader.ready:
             try:
                 self.release()
-                self._mask(REG_TX_CONTROL, 0x03, False)
             except NFCError:
                 pass
-        self.ready = False
-        self.crypto_on = False
-        self.i2c = None
+        self.reader.deinit()
 
     def field(self, on):
         """Energizes or drops the RF antenna"""
-        if not self.ready:
+        if not self.reader.ready:
             raise NFCError("Reader not ready")
         if not on:
             self.release()
-        self._mask(REG_TX_CONTROL, 0x03, on)
-
-    # ---------- Frame exchange ----------
-
-    def _wait_irq(self, mask, timeout_ms):
-        """Waits for a masked IRQ bit, the reader's timer, or the deadline"""
-        deadline = time.ticks_ms() + timeout_ms
-        for _ in range(MAX_POLLS):
-            irq = self._byte(REG_COM_IRQ)
-            if irq & mask:
-                return
-            if irq & IRQ_TIMER or time.ticks_ms() > deadline:
-                break
-        raise NFCError("No answer from tag")
-
-    def transceive(self, send, tx_last_bits=0, recv_size=0):
-        """Exchanges one frame, returning (reply, rx_last_bits).
-
-        recv_size is the largest reply accepted; a longer one is refused rather
-        than truncated, because truncating it would let the tag desynchronize
-        us. 0 means no reply is expected.
-        """
-        if not self.ready or not send or len(send) > FIFO_SIZE or tx_last_bits > 7:
-            raise NFCSizeError("Bad frame")
-
-        self._write(REG_COMMAND, PCD_IDLE)
-        self._write(REG_COM_IRQ, 0x7F)  # clear IRQs
-        self._write(REG_FIFO_LEVEL, 0x80)  # flush FIFO
-        self._raw(bytes([REG_FIFO_DATA]) + bytes(send))
-        self._write(REG_BIT_FRAMING, tx_last_bits)
-        self._write(REG_COMMAND, PCD_TRANSCEIVE)
-        self._mask(REG_BIT_FRAMING, 0x80, True)  # StartSend
-        try:
-            self._wait_irq(IRQ_RX | IRQ_IDLE, EXCHANGE_TIMEOUT_MS)
-        finally:
-            self._mask(REG_BIT_FRAMING, 0x80, False)
-
-        # A collision only happens with more than one card in the field; Krux
-        # asks for a single card rather than resolving it.
-        if self._byte(REG_ERROR) & ERR_FATAL_MASK:
-            raise NFCError("Reader error")
-
-        if not recv_size:
-            self._write(REG_COMMAND, PCD_IDLE)
-            return b"", 0
-
-        # The tag decides this number. Copying it into a smaller buffer is the
-        # classic MFRC522 overflow, so refuse rather than truncate.
-        level = self._byte(REG_FIFO_LEVEL)
-        if level > FIFO_SIZE:
-            raise NFCError("Oversized reply")
-        if level > recv_size:
-            raise NFCSizeError("Reply does not fit")
-
-        data = self._read(REG_FIFO_DATA, level) if level else b""
-        # RxLastBits is three bits wide; mask before it becomes shift arithmetic
-        return bytes(data), self._byte(REG_CONTROL) & 0x07
-
-    def transceive_crc(self, send, recv_size):
-        """Appends a CRC_A and verifies the one on the reply, stripping it.
-
-        recv_size must cover the payload plus CRC_LEN - the CRC arrives as part
-        of the frame, and an undersized buffer reads as an oversized reply.
-        """
-        if not send or len(send) + CRC_LEN > FIFO_SIZE or recv_size < CRC_LEN:
-            raise NFCSizeError("Bad frame")
-
-        reply, _ = self.transceive(bytes(send) + self.calc_crc(send), 0, recv_size)
-        # A reply carrying a CRC_A is at least three bytes
-        if len(reply) < 3:
-            raise NFCError("Malformed reply")
-        if self.calc_crc(reply[:-2]) != reply[-2:]:
-            raise NFCError("Bad CRC")
-        return reply[:-2]
-
-    def calc_crc(self, data):
-        """Computes a CRC_A with the reader's own coprocessor"""
-        if not self.ready or not data or len(data) > FIFO_SIZE:
-            raise NFCSizeError("Bad CRC input")
-
-        self._write(REG_COMMAND, PCD_IDLE)
-        self._write(REG_DIV_IRQ, 0x04)  # clear CRCIRq
-        self._write(REG_FIFO_LEVEL, 0x80)
-        self._raw(bytes([REG_FIFO_DATA]) + bytes(data))
-        self._write(REG_COMMAND, PCD_CALC_CRC)
-
-        deadline = time.ticks_ms() + CRC_TIMEOUT_MS
-        for _ in range(MAX_POLLS):
-            if self._byte(REG_DIV_IRQ) & 0x04:
-                self._write(REG_COMMAND, PCD_IDLE)
-                return bytes(
-                    [self._byte(REG_CRC_RESULT_L), self._byte(REG_CRC_RESULT_H)]
-                )
-            if time.ticks_ms() > deadline:
-                break
-        self._write(REG_COMMAND, PCD_IDLE)
-        raise NFCError("CRC timed out")
+        self.reader.field(on)
 
     # ---------- Selection ----------
 
     def _cascade(self, sel_cmd):
-        """One cascade level: anticollision to learn four UID bytes, then select"""
-        reply, _ = self.transceive(bytes([sel_cmd, 0x20]), 0, 5)
+        """Runs one anticollision and select level, returning (uid, sak)"""
+        reply, _ = self.reader.transceive(bytes([sel_cmd, 0x20]), 0, 5)
         if len(reply) != 5:
             raise NFCError("Bad anticollision")
         # BCC is a plain XOR check. A mismatch means a malformed frame, so stop
@@ -436,7 +208,7 @@ class NFC:
         if reply[0] ^ reply[1] ^ reply[2] ^ reply[3] != reply[4]:
             raise NFCError("Bad BCC")
 
-        sak = self.transceive_crc(bytes([sel_cmd, 0x70]) + reply, 1 + CRC_LEN)
+        sak = self.reader.transceive_crc(bytes([sel_cmd, 0x70]) + reply, 1 + CRC_LEN)
         if len(sak) != 1:
             raise NFCError("Bad SAK")
         return reply[:4], sak[0]
@@ -447,7 +219,7 @@ class NFC:
         Raises NFCNotFound when the field is empty, holds more than one tag, or
         holds a family Krux does not accept.
         """
-        if not self.ready:
+        if not self.reader.ready:
             raise NFCError("Reader not ready")
         self.release()
 
@@ -456,7 +228,7 @@ class NFC:
             # whatever was there, and a halted tag answers WUPA but ignores
             # REQA, which would make the card unselectable while it stays in
             # the field.
-            atqa, _ = self.transceive(bytes([CMD_WUPA]), 7, 2)
+            atqa, _ = self.reader.transceive(bytes([CMD_WUPA]), 7, 2)
             if len(atqa) != 2:
                 raise NFCError("Bad ATQA")
 
@@ -484,7 +256,7 @@ class NFC:
         """Halts the tag and drops any crypto1 session. Safe to call always."""
         self.authed_sector = None
         self.tag = None
-        if not self.ready:
+        if not self.reader.ready:
             return
         # HALT goes out before crypto is dropped: while a sector is
         # authenticated the reader enciphers the frame, and a plaintext HALT
@@ -492,15 +264,10 @@ class NFC:
         # authenticated. HALT draws no reply, so a timeout is the success case.
         try:
             halt = bytes([CMD_HALT, 0x00])
-            self.transceive(halt + self.calc_crc(halt))
+            self.reader.transceive(halt + self.reader.calc_crc(halt))
         except NFCError:
             pass
-        if self.crypto_on:
-            try:
-                self._mask(REG_STATUS2, 0x08, False)
-            except NFCError:
-                pass
-            self.crypto_on = False
+        self.reader.clear_crypto()
 
     # ---------- Linear addressing ----------
 
@@ -522,7 +289,7 @@ class NFC:
         return block
 
     def _authenticate(self, uid, block):
-        """Authenticates a sector with the factory key A.
+        """Authenticates a sector with the factory key A, once per sector.
 
         The protection is the KEF password, not the sector key: the card stays
         readable by any reader, and what a reader finds is ciphertext.
@@ -531,30 +298,7 @@ class NFC:
         if sector == self.authed_sector:
             return
         self.authed_sector = None
-
-        self._write(REG_COMMAND, PCD_IDLE)
-        self._write(REG_COM_IRQ, 0x7F)
-        self._write(REG_FIFO_LEVEL, 0x80)
-        # Classic authenticates on the last four UID bytes, the whole UID for
-        # single size tags and the tail for double size ones.
-        self._raw(
-            bytes([REG_FIFO_DATA, CMD_AUTH_KEY_A, block])
-            + MF_DEFAULT_KEY
-            + bytes(uid[-4:])
-        )
-        self._write(REG_COMMAND, PCD_AUTHENT)
-        try:
-            self._wait_irq(IRQ_IDLE, EXCHANGE_TIMEOUT_MS)
-        except NFCError:
-            self._write(REG_COMMAND, PCD_IDLE)
-            self.crypto_on = False
-            raise
-
-        # Crypto1On is the only reliable success signal
-        if not self._byte(REG_STATUS2) & 0x08:
-            self.crypto_on = False
-            raise NFCError("Authentication failed")
-        self.crypto_on = True
+        self.reader.authenticate(uid, block)
         self.authed_sector = sector
 
     def _ack(self, data):
@@ -566,7 +310,9 @@ class NFC:
         """
         if len(data) + CRC_LEN > FIFO_SIZE:
             raise NFCSizeError("Frame too long")
-        reply, valid_bits = self.transceive(bytes(data) + self.calc_crc(data), 0, 1)
+        reply, valid_bits = self.reader.transceive(
+            bytes(data) + self.reader.calc_crc(data), 0, 1
+        )
         if len(reply) != 1 or valid_bits != 4 or reply[0] & 0x0F != 0x0A:
             raise NFCError("Write not acknowledged")
 
@@ -579,7 +325,7 @@ class NFC:
             raise NFCSizeError("Range outside tag")
 
     def read(self, offset, length):
-        """Reads bytes at a linear offset, spanning blocks and pages as needed"""
+        """Reads bytes at a linear offset, spanning blocks as needed"""
         self._check_range(offset, length)
         uid, _ = self.tag
 
@@ -595,7 +341,9 @@ class NFC:
 
             # The block arrives with its CRC_A attached; the buffer has to hold
             # both or the reply reads as oversized.
-            data = self.transceive_crc(bytes([CMD_READ, block]), READ_LEN + CRC_LEN)
+            data = self.reader.transceive_crc(
+                bytes([CMD_READ, block]), READ_LEN + CRC_LEN
+            )
             if len(data) != READ_LEN:
                 raise NFCError("Bad block read")
             out += data[skip : skip + take]

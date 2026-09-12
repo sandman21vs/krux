@@ -139,12 +139,23 @@ class FakeI2C:
         self.regs[0x04] = 0x30  # RxIRq | IdleIRq
 
 
-def make_nfc(i2c, select=True):
-    """An NFC facade wired to the fake bus instead of a real one"""
-    from krux.nfc import NFC
+def make_reader(i2c):
+    """A WS1850S wired to the fake bus, with nothing above it"""
+    from krux.nfc_ws1850s import WS1850S
 
-    nfc = NFC(scl=1, sda=2)
-    nfc._open_bus = lambda: i2c
+    reader = WS1850S(scl=1, sda=2)
+    reader._open_bus = lambda: i2c
+    return reader
+
+
+def make_nfc(i2c, select=True):
+    """An NFC facade on a WS1850S wired to the fake bus instead of a real one"""
+    from krux.nfc import NFC
+    from krux.nfc_ws1850s import WS1850S
+
+    reader = WS1850S(scl=1, sda=2)
+    reader._open_bus = lambda: i2c
+    nfc = NFC(reader=reader)
     nfc.init()
     nfc.field(True)
     if select:
@@ -241,43 +252,36 @@ def test_a_payload_exactly_filling_the_tag_is_accepted(m5stickv):
 
 def test_init_comes_up_with_the_antenna_dark(m5stickv):
     """Callers energize the field deliberately, inside the tap page"""
-    from krux.nfc import NFC
-
     i2c = FakeI2C()
-    nfc = NFC(scl=1, sda=2)
-    nfc._open_bus = lambda: i2c
-    nfc.init()
-    assert nfc.ready
+    reader = make_reader(i2c)
+    reader.init()
+    assert reader.ready
     assert not i2c.regs[0x14] & 0x03
 
-    nfc.field(True)
+    reader.field(True)
     assert i2c.regs[0x14] & 0x03 == 0x03
-    nfc.field(False)
+    reader.field(False)
     assert not i2c.regs[0x14] & 0x03
 
 
 def test_missing_reader_is_reported(m5stickv):
-    from krux.nfc import NFC, NFCNotFound
+    from krux.nfc import NFCNotFound
 
-    nfc = NFC(scl=1, sda=2)
-    nfc._open_bus = lambda: FakeI2C(present=False)
     with pytest.raises(NFCNotFound):
-        nfc.init()
+        make_reader(FakeI2C(present=False)).init()
 
 
 def test_a_bus_device_that_is_not_a_reader_is_refused(m5stickv):
     """Answers on the bus, but does not behave like a WS1850S"""
-    from krux.nfc import NFC, NFCNotFound
+    from krux.nfc import NFCNotFound
 
     class Deaf(FakeI2C):
         def _write_reg(self, reg, val):
             if reg != 0x2D:
                 super()._write_reg(reg, val)
 
-    nfc = NFC(scl=1, sda=2)
-    nfc._open_bus = lambda: Deaf()
     with pytest.raises(NFCNotFound):
-        nfc.init()
+        make_reader(Deaf()).init()
 
 
 def test_deinit_drops_the_field_and_the_crypto_session(m5stickv):
@@ -296,7 +300,7 @@ def test_silent_tag_times_out(m5stickv):
 
     nfc = make_nfc(FakeI2C(FakeClassic()), select=False)
     with pytest.raises(NFCError):
-        nfc.transceive(b"\x99", 0, 4)
+        nfc.reader.transceive(b"\x99", 0, 4)
 
 
 def test_oversized_reply_is_refused_not_truncated(m5stickv):
@@ -305,11 +309,11 @@ def test_oversized_reply_is_refused_not_truncated(m5stickv):
 
     nfc = make_nfc(FakeI2C(FakeClassic()), select=False)
     with pytest.raises(NFCSizeError):
-        nfc.transceive(b"\x52", 7, 1)  # ATQA is two bytes
+        nfc.reader.transceive(b"\x52", 7, 1)  # ATQA is two bytes
 
-    nfc.i2c.forced_level = 200
+    nfc.reader.i2c.forced_level = 200
     with pytest.raises(NFCError):
-        nfc.transceive(b"\x52", 7, 64)
+        nfc.reader.transceive(b"\x52", 7, 64)
 
 
 def test_frame_longer_than_the_fifo_is_refused(m5stickv):
@@ -317,7 +321,7 @@ def test_frame_longer_than_the_fifo_is_refused(m5stickv):
 
     nfc = make_nfc(FakeI2C(FakeClassic()), select=False)
     with pytest.raises(NFCSizeError):
-        nfc.transceive(b"\x00" * 65, 0, 2)
+        nfc.reader.transceive(b"\x00" * 65, 0, 2)
 
 
 def test_reader_error_bits_fail_the_exchange(m5stickv):
@@ -331,12 +335,12 @@ def test_reader_error_bits_fail_the_exchange(m5stickv):
 
     nfc = make_nfc(Colliding(FakeClassic()), select=False)
     with pytest.raises(NFCError):
-        nfc.transceive(b"\x52", 7, 4)
+        nfc.reader.transceive(b"\x52", 7, 4)
 
 
 def test_calc_crc_matches_the_reference(m5stickv):
     nfc = make_nfc(FakeI2C(), select=False)
-    assert nfc.calc_crc(b"\x30\x04") == crc_a(b"\x30\x04")
+    assert nfc.reader.calc_crc(b"\x30\x04") == crc_a(b"\x30\x04")
 
 
 # ---------- Selection ----------
