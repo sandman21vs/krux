@@ -650,3 +650,31 @@ def test_an_xpub_card_is_not_a_wallet(nfc_on, mocker, tdata):
     header = build_header(44, 720, RECORD_XPUB)
     with pytest.raises(NFCNotFound):
         parse_header(header, 720, RECORD_DESCRIPTOR)
+
+
+@pytest.mark.parametrize(
+    "written, expected",
+    [
+        (b"hello from the keypad", "hello from the keypad"),  # text round trips
+        (b"\x00\x01\xff\xfe", b"\x00\x01\xff\xfe"),  # binary stays binary
+        (b"trailing newline\n", "trailing newline\n"),  # kept, unlike a file
+    ],
+)
+def test_a_datum_comes_back_as_what_was_written(nfc_on, mocker, written, expected):
+    """A card hands back binary. Text written from manual input has to come back
+    as text, or the tool shows its hex and offers binary conversions instead of
+    the string the user typed."""
+    from krux.pages.datum_tool import DatumTool, DatumToolMenu
+
+    mock_nfc(mocker, record=written)
+    captured = {}
+
+    def capture(self, *_args, **_kwargs):
+        captured["contents"] = self.contents
+        return None
+
+    mocker.patch.object(DatumTool, "view_contents", capture)
+    DatumToolMenu(create_ctx(mocker, [])).read_nfc()
+
+    assert captured["contents"] == expected
+    assert isinstance(captured["contents"], type(expected))

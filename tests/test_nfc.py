@@ -667,3 +667,57 @@ def test_naming_several_types_still_refuses_the_ones_left_out(m5stickv):
 
     with pytest.raises(NFCNotFound):
         nfc.read_record((RECORD_KEF, RECORD_DESCRIPTOR))
+
+
+# ---------- The write/read matrix ----------
+#
+# Every form Krux writes, against every set of types a read path accepts. The
+# point is not that each cell works but that the cells which must refuse do:
+# a seed card has to stay out of the wallet and a descriptor card out of the
+# mnemonic loader, and neither is allowed to depend on what the payload holds.
+
+WRITE_FORMS = {
+    "seed KEF (Backup > Encrypted)": 1,
+    "descriptor (Wallet Descriptor)": 2,
+    "datum (Datum Tool)": 3,
+    "xpub (Extended Public Key)": 4,
+}
+
+READ_PATHS = {
+    "Load Mnemonic > From NFC Card": (1,),
+    "Wallet Descriptor > Load from NFC card": (2,),
+    "Datum Tool > From NFC Card": (1, 2, 3, 4),
+}
+
+
+@pytest.mark.parametrize("write_name", sorted(WRITE_FORMS))
+@pytest.mark.parametrize("read_name", sorted(READ_PATHS))
+def test_the_write_read_matrix(m5stickv, write_name, read_name):
+    from krux.nfc import NFCNotFound
+
+    record_type = WRITE_FORMS[write_name]
+    accepted = READ_PATHS[read_name]
+
+    nfc = make_nfc(FakeI2C(FakeClassic()))
+    payload = bytes(range(48))
+    nfc.write_record(payload, record_type)
+
+    # Whatever the type, the card is never mistaken for blank
+    assert nfc.has_record(), "%s did not register as a record" % write_name
+
+    if record_type in accepted:
+        assert nfc.read_record(accepted) == payload, "%s should open in %s" % (
+            write_name,
+            read_name,
+        )
+    else:
+        with pytest.raises(NFCNotFound):
+            nfc.read_record(accepted)
+
+
+def test_the_matrix_covers_every_type_krux_writes(m5stickv):
+    """Fails when a record type is added without a row in the matrix above"""
+    import krux.nfc as nfc
+
+    assert sorted(WRITE_FORMS.values()) == sorted(nfc.KNOWN_RECORD_TYPES)
+    assert READ_PATHS["Datum Tool > From NFC Card"] == nfc.KNOWN_RECORD_TYPES

@@ -318,8 +318,19 @@ class DatumToolMenu(Page):
         if payload is None:
             return MENU_CONTINUE
 
+        # A card always hands back binary. Decode it when it is text, as the SD
+        # card path does, so a datum written from manual input comes back as the
+        # text it was rather than as its hex. Unlike that path no trailing
+        # newline is trimmed: a file usually ends with one, while a record holds
+        # exactly the bytes that were written.
+        payload = bytes(payload)
+        try:
+            payload = payload.decode()
+        except:
+            pass
+
         page = DatumTool(self.ctx)
-        page.contents = bytes(payload)
+        page.contents = payload
         page.title = t("NFC Card")
         return page.view_contents()
 
