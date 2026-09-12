@@ -172,6 +172,19 @@ class StoreOnNFC(NFCTapPage):
             self.ctx.input.wait_for_button()
         return MENU_CONTINUE
 
+    def write_datum(self, payload):
+        """Stores whatever the datum tool is holding.
+
+        Its own type, so a datum card walks into neither the mnemonic loader
+        nor the wallet. The datum tool takes arbitrary bytes and gives no
+        promise about them beyond that.
+        """
+        from ..nfc import RECORD_DATUM
+
+        if self._write(payload, RECORD_DATUM, t("Failed to store datum")):
+            self.flash_success(t("Datum stored on card"))
+        return MENU_CONTINUE
+
     def write_descriptor(self, kef_envelope):
         """Stores an encrypted wallet output descriptor"""
         from ..nfc import RECORD_DESCRIPTOR

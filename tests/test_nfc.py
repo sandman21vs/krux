@@ -205,7 +205,7 @@ def test_header_bytes_are_the_shared_on_card_format(m5stickv):
     )
 
 
-@pytest.mark.parametrize("record_type", [1, 2])
+@pytest.mark.parametrize("record_type", [1, 2, 3])
 def test_a_record_of_one_type_does_not_answer_as_the_other(m5stickv, record_type):
     """Asking for the wrong type reads as no record at all.
 
@@ -214,15 +214,17 @@ def test_a_record_of_one_type_does_not_answer_as_the_other(m5stickv, record_type
     """
     import krux.nfc as nfc
 
-    other = nfc.RECORD_DESCRIPTOR if record_type == nfc.RECORD_KEF else nfc.RECORD_KEF
     header = nfc.build_header(44, CAPACITY, record_type)
-
     assert nfc.parse_header(header, CAPACITY, record_type) == 44
-    with pytest.raises(nfc.NFCNotFound):
-        nfc.parse_header(header, CAPACITY, other)
+
+    for other in nfc.KNOWN_RECORD_TYPES:
+        if other == record_type:
+            continue
+        with pytest.raises(nfc.NFCNotFound):
+            nfc.parse_header(header, CAPACITY, other)
 
 
-@pytest.mark.parametrize("record_type", [1, 2])
+@pytest.mark.parametrize("record_type", [1, 2, 3])
 def test_any_krux_record_counts_as_something_to_overwrite(m5stickv, record_type):
     """has_record() takes no type, so a seed about to be replaced by a
     descriptor still raises the overwrite warning. Asking for the type being
@@ -236,7 +238,7 @@ def test_any_krux_record_counts_as_something_to_overwrite(m5stickv, record_type)
 def test_a_type_krux_cannot_write_is_refused_at_the_source(m5stickv):
     import krux.nfc as nfc
 
-    for record_type in (0, 3, 255):
+    for record_type in (0, 4, 255):
         with pytest.raises(nfc.NFCError):
             nfc.build_header(44, CAPACITY, record_type)
 
@@ -248,7 +250,7 @@ def test_a_type_krux_cannot_write_is_refused_at_the_source(m5stickv):
         b"\xff" * 16,  # an erased card
         b"KRN2\x01\x00\x00\x10" + bytes(8),  # near miss magic
         b"KRN1\x00\x00\x00\x10" + bytes(8),  # record type zero
-        b"KRN1\x03\x00\x00\x10" + bytes(8),  # unknown record type
+        b"KRN1\x04\x00\x00\x10" + bytes(8),  # unknown record type
         b"KRN1\xff\x00\x00\x10" + bytes(8),  # unknown record type
         b"KRN1\x01\x01\x00\x10" + bytes(8),  # reserved byte 5 set
         b"KRN1\x01\x00\x00\x10" + b"\x01" + bytes(7),  # reserved byte 8 set

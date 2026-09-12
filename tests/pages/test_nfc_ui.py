@@ -489,3 +489,86 @@ def test_the_tools_entry_reaches_the_erase_page(nfc_on, mocker):
     Tools(create_ctx(mocker, [BUTTON_ENTER])).erase_nfc_card()
 
     nfc.erase.assert_called_once_with()
+
+
+# ---------- Datum tool ----------
+
+
+def _datum_view(mocker, contents):
+    """A DatumToolView holding contents, with its analysis already run"""
+    from krux.pages.datum_tool import DatumTool
+
+    page = DatumTool(create_ctx(mocker, []))
+    page.contents = contents
+    page.title = "Datum"
+    page._analyze_contents()
+    return page
+
+
+def test_datum_offers_a_card_alongside_sd(nfc_on, mocker):
+    labels = [item[0] for item in _datum_view(mocker, "hello")._build_options_menu()]
+    assert "Save to SD card" in labels
+    assert "Store on NFC Card" in labels
+
+
+def test_datum_hides_the_card_while_nfc_is_off(m5stickv, mocker):
+    from krux.krux_settings import Settings
+
+    Settings().hardware.nfc.enabled = False
+    labels = [item[0] for item in _datum_view(mocker, "hello")._build_options_menu()]
+    assert "Save to SD card" in labels
+    assert not any("NFC" in label for label in labels)
+
+
+@pytest.mark.parametrize(
+    "contents",
+    [
+        "olympic term tissue route sense program under choose bean emerge "
+        "velvet absurd",  # 12 words
+        bytes(range(1, 16)) + b"\xff",  # 16 bytes of what looks like entropy
+    ],
+)
+def test_a_datum_that_looks_like_a_seed_reaches_no_card(nfc_on, mocker, contents):
+    """The card is behind the same gate as the SD card. A mnemonic the datum
+    tool is holding does not leave the device in the clear by either road."""
+    page = _datum_view(mocker, contents)
+    assert page.sensitive
+
+    labels = [item[0] for item in page._build_options_menu()]
+    assert "Save to SD card" not in labels
+    assert not any("NFC" in label for label in labels)
+
+
+def test_datum_write_tags_the_record_as_a_datum(nfc_on, mocker):
+    """Its own type, so a datum card loads in neither the wallet nor the
+    mnemonic loader."""
+    from krux.nfc import RECORD_DATUM
+
+    nfc = mock_nfc(mocker)
+    page = _datum_view(mocker, "hello")
+    page.ctx = create_ctx(mocker, [])
+    page.save_nfc()
+
+    nfc.write_record.assert_called_once_with(b"hello", RECORD_DATUM)
+
+
+def test_datum_read_accepts_any_krux_record(nfc_on, mocker):
+    """The inspection tool: a seed card, a descriptor card and a datum card all
+    open here, as the bytes they are."""
+    from krux.pages.datum_tool import DatumTool, DatumToolMenu
+    from krux.nfc import KNOWN_RECORD_TYPES
+
+    nfc = mock_nfc(mocker, record=b"\x01\x02\x03")
+    mocker.patch.object(DatumTool, "view_contents", return_value=None)
+
+    DatumToolMenu(create_ctx(mocker, [])).read_nfc()
+    nfc.read_record.assert_called_once_with(KNOWN_RECORD_TYPES)
+
+
+def test_datum_input_menu_offers_the_card_only_when_on(nfc_on, mocker):
+    import krux.pages.datum_tool as datum_tool
+
+    labels = _menu_labels(
+        mocker, datum_tool, lambda: datum_tool.DatumToolMenu(create_ctx(mocker, []))
+    )
+    assert "From NFC Card" in labels

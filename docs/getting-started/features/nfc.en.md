@@ -52,6 +52,7 @@ bus and detaches again without energizing the antenna.
 |--------|--------------|-----------|
 | Encrypted mnemonic | Backup → Encrypted → Store on NFC Card | Load Mnemonic → From NFC Card |
 | Wallet output descriptor | Wallet Descriptor → Plaintext or Encrypted | Wallet Descriptor → Load from NFC card |
+| Datum | Tools → Datum Tool → Store on NFC Card | Tools → Datum Tool → From NFC Card |
 
 Each record carries a type byte, and a reader asks for the type it can parse, so
 a descriptor card offered to the mnemonic loader — or a seed card offered to the
@@ -62,6 +63,14 @@ A descriptor record holds either a sealed envelope or a bare descriptor, exactly
 as a `.txt` on an SD card may; Krux tells them apart on read. **A mnemonic
 record is always sealed.** The mnemonic loader accepts nothing else, and no part
 of Krux writes a seed to a card in the clear.
+
+The [Datum Tool](../usage/tools.md) is the exception to the type discipline on
+the read side: it opens any record Krux knows how to write, as the bytes it is,
+because it is the inspection tool and refusing to show what is on a card its
+owner is holding would be theatre. What it writes is still tagged as a datum, so
+a datum card loads in neither the wallet nor the mnemonic loader. Its card
+option sits behind the same gate as its SD card option — content that looks like
+a mnemonic reaches neither.
 
 ### What a plaintext descriptor record costs
 
