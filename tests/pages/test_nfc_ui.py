@@ -104,24 +104,26 @@ def test_polling_continues_until_a_card_shows_up(nfc_on, mocker):
 def test_store_writes_the_envelope(nfc_on, mocker):
     from krux.pages.nfc_ui import StoreOnNFC
     from krux.input import BUTTON_ENTER
+    from krux.nfc import RECORD_KEF
 
     nfc = mock_nfc(mocker)
     # One press dismisses the confirmation screen
     StoreOnNFC(create_ctx(mocker, [BUTTON_ENTER])).write(ENVELOPE, "abcd1234")
 
-    nfc.write_record.assert_called_once_with(ENVELOPE)
+    nfc.write_record.assert_called_once_with(ENVELOPE, RECORD_KEF)
     nfc.deinit.assert_called_once()
 
 
 def test_store_asks_before_overwriting(nfc_on, mocker):
     from krux.pages.nfc_ui import StoreOnNFC
     from krux.input import BUTTON_ENTER
+    from krux.nfc import RECORD_KEF
 
     nfc = mock_nfc(mocker, has_record=True)
     StoreOnNFC(create_ctx(mocker, [BUTTON_ENTER, BUTTON_ENTER])).write(
         ENVELOPE, "abcd1234"
     )
-    nfc.write_record.assert_called_once_with(ENVELOPE)
+    nfc.write_record.assert_called_once_with(ENVELOPE, RECORD_KEF)
 
 
 def test_store_declining_the_overwrite_leaves_the_card_alone(nfc_on, mocker):
@@ -149,6 +151,81 @@ def test_store_reports_a_card_that_cannot_hold_the_backup(nfc_on, mocker):
     nfc.deinit.assert_called_once()
 
 
+def test_store_descriptor_tags_the_record_as_a_descriptor(nfc_on, mocker):
+    """The type byte is what keeps this card out of the mnemonic loader"""
+    from krux.pages.nfc_ui import StoreOnNFC
+    from krux.nfc import RECORD_DESCRIPTOR
+
+    nfc = mock_nfc(mocker)
+    StoreOnNFC(create_ctx(mocker, [])).write_descriptor(ENVELOPE)
+
+    nfc.write_record.assert_called_once_with(ENVELOPE, RECORD_DESCRIPTOR)
+    nfc.field.assert_any_call(True)
+    nfc.deinit.assert_called_once()
+
+
+def test_store_descriptor_reports_a_card_that_cannot_hold_it(nfc_on, mocker):
+    """A 3 of 5 is several times the size of a seed, so this path is reachable"""
+    from krux.pages.nfc_ui import StoreOnNFC
+    from krux.nfc import NFCSizeError
+
+    nfc = mock_nfc(mocker)
+    nfc.write_record.side_effect = NFCSizeError("too big")
+
+    ctx = create_ctx(mocker, [])
+    StoreOnNFC(ctx).write_descriptor(ENVELOPE)
+    ctx.display.flash_text.assert_called_once()
+    nfc.deinit.assert_called_once()
+
+
+def test_store_descriptor_warns_before_replacing_a_seed(nfc_on, mocker):
+    """has_record() takes no type, so the card holding a seed still warns"""
+    from krux.pages.nfc_ui import StoreOnNFC
+    from krux.input import BUTTON_PAGE
+
+    nfc = mock_nfc(mocker, has_record=True)
+    # BUTTON_PAGE answers "No" on a minimal display
+    StoreOnNFC(create_ctx(mocker, [BUTTON_PAGE])).write_descriptor(ENVELOPE)
+
+    nfc.write_record.assert_not_called()
+    nfc.deinit.assert_called_once()
+
+
+def test_a_write_that_fails_mid_card_is_reported(nfc_on, mocker):
+    """Not a size problem - the card moved, or a block refused the write"""
+    from krux.pages.nfc_ui import StoreOnNFC
+    from krux.nfc import NFCError
+
+    for store in ("write", "write_descriptor"):
+        nfc = mock_nfc(mocker)
+        nfc.write_record.side_effect = NFCError("write not acknowledged")
+
+        ctx = create_ctx(mocker, [])
+        page = StoreOnNFC(ctx)
+        if store == "write":
+            page.write(ENVELOPE, "abcd1234")
+        else:
+            page.write_descriptor(ENVELOPE)
+
+        ctx.display.flash_text.assert_called_once()
+        nfc.deinit.assert_called_once()
+
+
+def test_leaving_the_tap_page_stores_nothing(nfc_on, mocker):
+    from krux.pages.nfc_ui import StoreOnNFC
+    from krux.input import BUTTON_PAGE
+    from krux.nfc import NFCNotFound
+
+    nfc = mock_nfc(mocker)
+    nfc.poll.side_effect = NFCNotFound("No card")
+
+    StoreOnNFC(create_ctx(mocker, [BUTTON_PAGE])).write_descriptor(ENVELOPE)
+
+    nfc.write_record.assert_not_called()
+    nfc.field.assert_any_call(False)
+    nfc.deinit.assert_called_once()
+
+
 # ---------- Load ----------
 
 
@@ -170,6 +247,19 @@ def test_load_from_a_card_with_no_backup(nfc_on, mocker):
 
     assert LoadFromNFC(create_ctx(mocker, [])).read() is None
     nfc.deinit.assert_called_once()
+
+
+def test_load_asks_the_card_for_the_type_the_caller_can_parse(nfc_on, mocker):
+    from krux.pages.nfc_ui import LoadFromNFC
+    from krux.nfc import RECORD_DESCRIPTOR, RECORD_KEF
+
+    nfc = mock_nfc(mocker)
+    LoadFromNFC(create_ctx(mocker, [])).read(RECORD_DESCRIPTOR)
+    nfc.read_record.assert_called_once_with(RECORD_DESCRIPTOR)
+
+    nfc = mock_nfc(mocker)
+    LoadFromNFC(create_ctx(mocker, [])).read()
+    nfc.read_record.assert_called_once_with(RECORD_KEF)
 
 
 def test_load_decrypts_into_words(nfc_on, mocker):

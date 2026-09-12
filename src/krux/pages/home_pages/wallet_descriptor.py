@@ -26,6 +26,7 @@ from .. import (
     MENU_CONTINUE,
     LOAD_FROM_CAMERA,
     LOAD_FROM_SD,
+    LOAD_FROM_NFC,
 )
 from ...display import (
     DEFAULT_PADDING,
@@ -34,7 +35,7 @@ from ...display import (
     FONT_WIDTH,
     MINIMAL_PADDING,
 )
-from ...krux_settings import t
+from ...krux_settings import t, Settings
 from ...qr import FORMAT_NONE, FORMAT_PMOFN
 from ...sd_card import (
     DESCRIPTOR_FILE_EXTENSION,
@@ -102,6 +103,18 @@ class WalletDescriptor(Page):
             utils = Utils(self.ctx)
             utils.print_standard_qr(wallet_data, qr_format, title)
 
+            # A card takes the sealed envelope, so it is only offered for the
+            # encrypted export. A plaintext descriptor would reach the card with
+            # no integrity check at all - to_string() carries no BIP-380
+            # checksum - and would hand every xpub to whoever waves a reader
+            # past it.
+            if is_encrypted and Settings().hardware.nfc.enabled:
+                self.ctx.display.clear()
+                if self.prompt(t("Store on NFC Card"), self.ctx.display.height() // 2):
+                    from ..nfc_ui import StoreOnNFC
+
+                    StoreOnNFC(self.ctx).write_descriptor(wallet_data)
+
             # Try to save the Wallet output descriptor on the SD card
             if self.has_sd_card() and not self.ctx.wallet.persisted:
                 from ..file_operations import SaveFile
@@ -127,7 +140,7 @@ class WalletDescriptor(Page):
         persisted = False
         wallet_data = None
 
-        load_method = self.load_method()
+        load_method = self.load_method(nfc=True)
         if load_method == LOAD_FROM_CAMERA:
             from ..qr_capture import QRCodeCapture
 
@@ -152,6 +165,18 @@ class WalletDescriptor(Page):
                 # Cancelled, or load_file already reported the failure
                 return None
             persisted = True
+        elif load_method == LOAD_FROM_NFC:
+            # The card hands back a sealed envelope and nothing else. What it
+            # holds is decided below by the same decryption and the same
+            # descriptor parser a QR code or an SD card file goes through.
+            from ..nfc_ui import LoadFromNFC
+            from ...nfc import RECORD_DESCRIPTOR
+
+            qr_format = FORMAT_NONE
+            wallet_data = LoadFromNFC(self.ctx).read(RECORD_DESCRIPTOR)
+            if wallet_data is None:
+                # The page already said why, or the user left it
+                return None
         else:  # Cancel
             return None
 

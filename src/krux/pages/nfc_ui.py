@@ -125,51 +125,78 @@ class NFCTapPage(Page):
 class StoreOnNFC(NFCTapPage):
     """Writes a KEF envelope to a card"""
 
-    def write(self, kef_envelope, mnemonic_id):
-        """Asks for a card and writes the envelope onto it"""
+    def _write(self, kef_envelope, record_type, failure_text):
+        """Asks for a card and writes the envelope onto it, reporting success.
+
+        The card dance is the same whatever the envelope holds; only the record
+        type and what to say when it fails belong to the caller.
+        """
         from ..nfc import NFCError, NFCSizeError
 
         if not self.open_reader():
-            return MENU_CONTINUE
+            return False
         try:
             if not self.wait_for_tag(t("Store on NFC Card")):
-                return MENU_CONTINUE
+                return False
             if self.nfc.has_record():
                 self.ctx.display.clear()
                 if not self.prompt(t("Overwrite?"), self.ctx.display.height() // 2):
-                    return MENU_CONTINUE
+                    return False
                 # Ask for the card again rather than trusting the earlier poll:
                 # the prompt was up in between, and the card only had to drift a
                 # centimetre.
                 if not self.wait_for_tag(t("Store on NFC Card")):
-                    return MENU_CONTINUE
+                    return False
             try:
-                self.nfc.write_record(kef_envelope)
+                self.nfc.write_record(kef_envelope, record_type)
             except NFCSizeError:
                 self.flash_error(t("Card too small"))
-                return MENU_CONTINUE
+                return False
             except NFCError:
-                self.flash_error(t("Failed to store mnemonic"))
-                return MENU_CONTINUE
+                self.flash_error(failure_text)
+                return False
         finally:
             self.close_reader()
+        return True
 
-        self.ctx.display.clear()
-        self.ctx.display.draw_centered_text(
-            t("Encrypted mnemonic stored with ID:") + " " + mnemonic_id,
-            highlight_prefix=":",
-        )
-        self.ctx.input.wait_for_button()
+    def write(self, kef_envelope, mnemonic_id):
+        """Stores an encrypted mnemonic"""
+        from ..nfc import RECORD_KEF
+
+        if self._write(kef_envelope, RECORD_KEF, t("Failed to store mnemonic")):
+            self.ctx.display.clear()
+            self.ctx.display.draw_centered_text(
+                t("Encrypted mnemonic stored with ID:") + " " + mnemonic_id,
+                highlight_prefix=":",
+            )
+            self.ctx.input.wait_for_button()
+        return MENU_CONTINUE
+
+    def write_descriptor(self, kef_envelope):
+        """Stores an encrypted wallet output descriptor"""
+        from ..nfc import RECORD_DESCRIPTOR
+
+        if self._write(
+            kef_envelope, RECORD_DESCRIPTOR, t("Failed to store descriptor")
+        ):
+            self.flash_success(t("Descriptor stored on card"))
         return MENU_CONTINUE
 
 
 class LoadFromNFC(NFCTapPage):
     """Reads a KEF envelope off a card"""
 
-    def read(self):
+    def read(self, record_type=None):
         """Returns the envelope bytes, or None. Detaches the reader first, so
-        the password is asked for with the antenna already down."""
-        from ..nfc import NFCError
+        the password is asked for with the antenna already down.
+
+        record_type is what the caller can parse; a card holding anything else
+        reports as empty rather than handing back a payload nobody asked for.
+        """
+        from ..nfc import NFCError, RECORD_KEF
+
+        if record_type is None:
+            record_type = RECORD_KEF
 
         if not self.open_reader():
             return None
@@ -177,10 +204,11 @@ class LoadFromNFC(NFCTapPage):
             if not self.wait_for_tag(t("From NFC Card")):
                 return None
             try:
-                return self.nfc.read_record()
+                return self.nfc.read_record(record_type)
             except NFCError:
-                # A card with no record, an unreadable one, and one whose header
-                # was refused all say the same thing here on purpose.
+                # A card with no record, an unreadable one, one holding a record
+                # of another type, and one whose header was refused all say the
+                # same thing here on purpose.
                 self.flash_error(t("No backup on this card"))
                 return None
         finally:
