@@ -193,6 +193,53 @@ def test_header_bytes_are_the_shared_on_card_format(m5stickv):
     assert bytes(nfc.build_header(64, CAPACITY)) == b"KRN1\x01\x00\x00\x40" + bytes(8)
     assert nfc.parse_header(b"KRN1\x01\x00\x00\x2c" + bytes(8), CAPACITY) == 44
 
+    # The descriptor type, pinned the same way and for the same reason
+    assert bytes(
+        nfc.build_header(64, CAPACITY, nfc.RECORD_DESCRIPTOR)
+    ) == b"KRN1\x02\x00\x00\x40" + bytes(8)
+    assert (
+        nfc.parse_header(
+            b"KRN1\x02\x00\x00\x2c" + bytes(8), CAPACITY, nfc.RECORD_DESCRIPTOR
+        )
+        == 44
+    )
+
+
+@pytest.mark.parametrize("record_type", [1, 2])
+def test_a_record_of_one_type_does_not_answer_as_the_other(m5stickv, record_type):
+    """Asking for the wrong type reads as no record at all.
+
+    This is what keeps a descriptor card out of the mnemonic loader and a seed
+    card out of the wallet, before either payload is decrypted.
+    """
+    import krux.nfc as nfc
+
+    other = nfc.RECORD_DESCRIPTOR if record_type == nfc.RECORD_KEF else nfc.RECORD_KEF
+    header = nfc.build_header(44, CAPACITY, record_type)
+
+    assert nfc.parse_header(header, CAPACITY, record_type) == 44
+    with pytest.raises(nfc.NFCNotFound):
+        nfc.parse_header(header, CAPACITY, other)
+
+
+@pytest.mark.parametrize("record_type", [1, 2])
+def test_any_krux_record_counts_as_something_to_overwrite(m5stickv, record_type):
+    """has_record() takes no type, so a seed about to be replaced by a
+    descriptor still raises the overwrite warning. Asking for the type being
+    written would report an empty card and take the seed with it."""
+    import krux.nfc as nfc
+
+    header = nfc.build_header(44, CAPACITY, record_type)
+    assert nfc.parse_header(header, CAPACITY) == 44
+
+
+def test_a_type_krux_cannot_write_is_refused_at_the_source(m5stickv):
+    import krux.nfc as nfc
+
+    for record_type in (0, 3, 255):
+        with pytest.raises(nfc.NFCError):
+            nfc.build_header(44, CAPACITY, record_type)
+
 
 @pytest.mark.parametrize(
     "header",
@@ -201,7 +248,8 @@ def test_header_bytes_are_the_shared_on_card_format(m5stickv):
         b"\xff" * 16,  # an erased card
         b"KRN2\x01\x00\x00\x10" + bytes(8),  # near miss magic
         b"KRN1\x00\x00\x00\x10" + bytes(8),  # record type zero
-        b"KRN1\x02\x00\x00\x10" + bytes(8),  # unknown record type
+        b"KRN1\x03\x00\x00\x10" + bytes(8),  # unknown record type
+        b"KRN1\xff\x00\x00\x10" + bytes(8),  # unknown record type
         b"KRN1\x01\x01\x00\x10" + bytes(8),  # reserved byte 5 set
         b"KRN1\x01\x00\x00\x10" + b"\x01" + bytes(7),  # reserved byte 8 set
         b"KRN1\x01\x00\x00\x10" + bytes(7) + b"\x01",  # reserved byte 15 set
@@ -454,6 +502,38 @@ def test_record_round_trip(m5stickv):
     nfc.write_record(envelope)
     assert nfc.has_record()
     assert nfc.read_record() == envelope
+
+
+def test_a_descriptor_round_trips_through_a_real_card(m5stickv):
+    """The whole stack, not just the header: a descriptor sized like a 2 of 3
+    goes out over the same block addressing a seed uses and comes back."""
+    from krux.nfc import RECORD_DESCRIPTOR, RECORD_KEF, NFCNotFound
+
+    nfc = make_nfc(FakeI2C(FakeClassic()))
+    envelope = bytes(range(256)) * 2  # 512 bytes, a sealed 2 of 3 descriptor
+
+    nfc.write_record(envelope, RECORD_DESCRIPTOR)
+    assert nfc.has_record()
+    assert nfc.read_record(RECORD_DESCRIPTOR) == envelope
+
+    # The seed loader asking the same card finds nothing to load
+    with pytest.raises(NFCNotFound):
+        nfc.read_record(RECORD_KEF)
+
+
+def test_a_seed_card_warns_before_a_descriptor_lands_on_it(m5stickv):
+    """The overwrite prompt reads has_record(), which takes no type. If it
+    asked for the type being written, this card would look blank and the seed
+    would go without a word."""
+    from krux.nfc import RECORD_DESCRIPTOR, RECORD_KEF
+
+    nfc = make_nfc(FakeI2C(FakeClassic()))
+    nfc.write_record(bytes(range(32)), RECORD_KEF)
+
+    assert nfc.has_record()
+
+    nfc.write_record(bytes(range(60)), RECORD_DESCRIPTOR)
+    assert nfc.read_record(RECORD_DESCRIPTOR) == bytes(range(60))
 
 
 def test_blank_card_reports_no_record(m5stickv):

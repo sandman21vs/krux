@@ -37,7 +37,7 @@ Krux writes.
 Record layout - 16 byte header at linear offset 0, payload right after:
 
     0..3    magic "KRN1"
-    4       record type (RECORD_KEF)
+    4       record type (RECORD_KEF, RECORD_DESCRIPTOR)
     5       reserved, must be zero
     6..7    payload length, big endian
     8..15   reserved, must be zero
@@ -46,6 +46,15 @@ The magic tags the format, not the device. It is shared with the Kern NFC
 branch, which originated this layout, so a card written by either firmware
 reads on the other. There is no checksum: the KEF envelope is authenticated, so
 a half-written or decaying card fails to decrypt.
+
+The type byte says what is inside the envelope, not how it is wrapped - every
+type is KEF sealed, so every type is authenticated and compressed. RECORD_KEF
+keeps the name it shipped under, when a seed was the only thing there was.
+Asking for the wrong type reads as no record at all, so a descriptor card
+cannot walk into the mnemonic loader and a seed card cannot walk into the
+wallet. One thing it deliberately is not is a permission: what a type buys is a
+parser, and each caller still runs the same validation that data arriving by QR
+or SD would face.
 """
 
 from .nfc_reader import (
@@ -63,6 +72,8 @@ __all__ = ("NFC", "NFCError", "NFCNotFound", "NFCSizeError")
 HEADER_LEN = 16
 RECORD_MAGIC = b"KRN1"
 RECORD_KEF = 1
+RECORD_DESCRIPTOR = 2
+KNOWN_RECORD_TYPES = (RECORD_KEF, RECORD_DESCRIPTOR)
 
 # Largest payload Krux will read off a card, whatever the card claims to hold.
 # A KEF-wrapped 24 word seed is under 100 bytes; the ceiling stops a hostile tag
@@ -96,20 +107,27 @@ READ_LEN = 16
 MAX_CAPACITY = MAX_PAYLOAD + HEADER_LEN
 
 
-def parse_header(header, capacity):
+def parse_header(header, capacity, record_type=None):
     """Validates a header read off a tag, returns the payload length.
 
     capacity is the tag's usable linear byte count including the header, so the
     declared length is checked against what the card can physically hold as well
     as against the ceiling.
+
+    record_type None accepts any type Krux knows how to write, which is what
+    "is there already a record here" has to ask before overwriting one. A caller
+    that is about to parse the payload names the type it can parse instead, and
+    anything else reads as no record.
     """
     if len(header) < HEADER_LEN or bytes(header[:4]) != RECORD_MAGIC:
         raise NFCNotFound("Not a Krux record")
 
-    # One known type, and reserved bytes that must be zero: it denies the field
+    wanted = KNOWN_RECORD_TYPES if record_type is None else (record_type,)
+
+    # A known type, and reserved bytes that must be zero: it denies the field
     # as a covert channel and stops stale bytes from silently acquiring meaning
     # in a later format version.
-    if header[4] != RECORD_KEF or header[5] != 0 or any(header[8:HEADER_LEN]):
+    if header[4] not in wanted or header[5] != 0 or any(header[8:HEADER_LEN]):
         raise NFCNotFound("Not a Krux record")
 
     # A number a stranger picked. Bound it before it sizes an allocation.
@@ -119,13 +137,15 @@ def parse_header(header, capacity):
     return length
 
 
-def build_header(length, capacity):
+def build_header(length, capacity, record_type=RECORD_KEF):
     """Serializes the header for a payload about to be written"""
+    if record_type not in KNOWN_RECORD_TYPES:
+        raise NFCError("Unknown record type")
     if not 0 < length <= min(MAX_PAYLOAD, capacity - HEADER_LEN):
         raise NFCSizeError("Invalid record length")
     header = bytearray(HEADER_LEN)
     header[0:4] = RECORD_MAGIC
-    header[4] = RECORD_KEF
+    header[4] = record_type
     header[6] = length >> 8
     header[7] = length & 0xFF
     return header
@@ -373,7 +393,10 @@ class NFC:
     # ---------- Records ----------
 
     def has_record(self):
-        """True when the selected tag already carries a Krux record.
+        """True when the selected tag already carries a Krux record, of any type.
+
+        Any type on purpose: this is what the overwrite warning asks, and a seed
+        a descriptor is about to land on has to count as something to lose.
 
         Absent or unreadable records report False, so callers can warn before
         overwriting without a card fault looking like a refusal.
@@ -384,18 +407,18 @@ class NFC:
         except NFCError:
             return False
 
-    def read_record(self):
-        """Reads the record off the selected tag, validating it throughout"""
-        length = parse_header(self.read(0, HEADER_LEN), self.tag[1])
+    def read_record(self, record_type=RECORD_KEF):
+        """Reads a record of the named type, validating it throughout"""
+        length = parse_header(self.read(0, HEADER_LEN), self.tag[1], record_type)
         # length is already bounded by the ceiling and by this tag's capacity
         return self.read(HEADER_LEN, length)
 
-    def write_record(self, data):
+    def write_record(self, data, record_type=RECORD_KEF):
         """Writes a record, replacing whatever was there.
 
         Header and payload go out as one contiguous image so the write stays
         block aligned from offset zero and never touches a block it does not
         fully own.
         """
-        header = build_header(len(data), self.tag[1])
+        header = build_header(len(data), self.tag[1], record_type)
         self.write(0, bytes(header) + bytes(data))
